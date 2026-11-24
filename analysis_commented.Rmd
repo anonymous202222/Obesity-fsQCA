@@ -1,0 +1,2755 @@
+---
+title: "Food supply, socioeconomic drivers and obesity in Sub-Saharan Africa"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+if (!exists("DATA_DIR")) DATA_DIR <- "data"      # folder with the input files (see README)
+if (!exists("FIG_DIR"))  FIG_DIR  <- "figures"   # folder where PNG figures are saved
+dir.create(FIG_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# OVERVIEW OF THIS ANALYSIS
+# 1. Food supply (FAO Food Balance Sheets): two releases (1990-2013, 2010-2022) are cleaned, grouped into
+#    food groups and harmonised into one 1990-2022 series.
+# 2. Socioeconomic drivers (World Bank-style indicators + GNI) are cleaned and merged.
+# 3. Obesity prevalence (NCD-RisC) is cleaned and averaged over sexes.
+# 4. Trend plots (SSA average vs Kenya vs World) and comparison with EAT-Lancet reference ranges.
+# 5. Spearman correlations with obesity, then fuzzy-set QCA (fsQCA) for 1992 and 2022:
+#    necessity analysis, truth tables, complex / parsimonious / intermediate solutions, sensitivity checks.
+```
+
+
+```{r packages}
+# Packages
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(corrr)
+library(readxl)
+library(tidyr)
+library(gridExtra)
+library(grid)
+library(readr)
+library(patchwork)
+library(corrplot)
+library(Hmisc)
+library(mgcv)
+library(minerva)
+library(igraph)
+library(reshape2)
+library(purrr)
+#install.packages("QCA")
+library(QCA)
+#install.packages("SetMethods")
+library(SetMethods)
+
+```
+
+
+# Food supply data
+```{r}
+#Load dataset 1990-2013
+# ---- 1. FOOD SUPPLY: HISTORIC FAO FOOD BALANCE SHEETS (1990-2013) ----
+# Reads the historic FAOSTAT file (wide format: one column per year).
+# Steps: reshape to long -> drop missing/flag values -> keep SSA countries,
+# selected elements and food items -> convert units -> aggregate into food groups.
+all_data1 <- read_excel(file.path(DATA_DIR, "FoodBalanceSheetsHistoric_E_All_Data.xlsx"))
+View(all_data1)
+#######################
+#clean data
+# Wide -> long: one row per Area/Item/Element/Year.
+all_data <- all_data1 %>%
+  pivot_longer(cols = starts_with("Y19") | starts_with("Y20"), names_to = "Year", values_to = "Value")
+
+print(all_data)
+View(all_data)
+#######################
+# Remove rows where Value is "X"
+all_data <- all_data %>%
+# "X" marks missing values in the FAO file, so those rows are removed.
+  filter(Value != "X")
+
+print(all_data)
+#######################
+#Remove "Y" from Year column
+all_data <- all_data %>%
+  mutate(Year = str_remove(Year, "^Y"))
+
+print(all_data)
+#######################
+# Remove unnecessary columns
+colnames(all_data)
+# Drop FAO code columns that are not needed (names/labels are kept instead).
+columns_to_remove <- c("Area Code (M49)", "Area Code", "Item Code", "Item Code (FBS)", "Element Code", "1961", "19612")
+all_data <- all_data %>% select(-all_of(columns_to_remove))
+
+print(all_data)
+#######################
+#Rename Area to Region
+# "Region" is the common key used to join with the drivers and obesity data.
+names(all_data)[names(all_data) == "Area"] <- "Region"
+
+print(all_data)
+unique(all_data$Item)
+unique(all_data$Element)
+unique(all_data$Region)
+#######################
+#select countries
+# Countries analysed: 38 Sub-Saharan African (SSA) countries plus "World" for comparison.
+# Names follow FAO spelling here and are harmonised to World Bank spelling just below.
+regions_to_keep <- c(
+  "Angola", "Benin", "Botswana", "Burkina Faso", "Cabo Verde", "Cameroon",
+  "Central African Republic", "Chad", "Congo", "Côte d'Ivoire",
+  "Eswatini", "Ethiopia", "Gabon", "Gambia", "Sao Tome and Principe",
+  "Ghana", "Guinea", "Guinea-Bissau", "Kenya", "Lesotho", "Liberia", "Madagascar",
+  "Malawi", "Mali", "Mauritania", "Mauritius", "Mozambique", "Namibia", "Niger",
+  "Nigeria", "Rwanda", "Senegal", "Sierra Leone", "South Africa",
+  "Togo", "Uganda",  "Zambia", "Zimbabwe", "United Republic of Tanzania", "World"
+)
+# Keep only the selected regions, then rename to World Bank / NCD-RisC style names so joins work.
+old_data2 <- all_data %>%
+  filter(Region %in% regions_to_keep)
+
+old_data2$Region[old_data2$Region == "Congo"] <- "Congo, Rep."
+old_data2$Region[old_data2$Region ==  "United Republic of Tanzania"] <- "Tanzania"
+old_data2$Region[old_data2$Region ==  "Gambia"] <- "Gambia, The"
+old_data2$Region[old_data2$Region ==  "Côte d'Ivoire"] <- "Cote d'Ivoire"
+
+unique(old_data2$Region)
+#######################
+#Elements to keep
+unique(old_data2$Element)
+
+# Keep supply, trade and use elements. Only "Food supply quantity (kg/capita/yr)" and
+# "Food supply (kcal/capita/day)" are used further down.
+Elements_to_keep <- c(
+  "Food supply quantity (kg/capita/yr)", "Food supply (kcal/capita/day)", "Export Quantity", "Production",
+  "Import Quantity", "Processing", "Losses", "Feed", "Seed", "Other uses (non-food)"
+)
+data <- old_data2 %>%
+  filter(Element %in% Elements_to_keep)
+
+unique(data$Element)
+#######################
+#Items to keep
+unique(data$Item)
+unique(data$Item)
+
+# Food items grouped into food groups later. Includes "Grand Total" (total energy supply).
+items_to_keep <- c("Wheat and products", "Rice and products", "Barley and products", "Maize and products",
+"Rye and products", "Oats", "Millet and products", "Sorghum and products",
+"Cereals, other","Potatoes and products", "Cassava and products", "Sweet potatoes",
+"Roots, Other", "Yams", "Starchy Roots", "Fish, Liver Oil", "Fish, Body Oil",
+"Cream", "Butter, Ghee", "Fats, Animals, Raw", "Oilcrops Oil, Other", "Maize Germ Oil",
+"Ricebran Oil", "Olive Oil", "Sesameseed Oil", "Coconut Oil", "Palm Oil", "Palmkernel Oil",
+"Cottonseed Oil", "Rape and Mustard Oil",  "Sunflowerseed Oil", "Groundnut Oil", "Soyabean Oil",
+"Bovine Meat", "Mutton & Goat Meat", "Pigmeat", "Poultry Meat", "Meat, Other", "Offals, Edible",
+"Eggs","Freshwater Fish", "Demersal Fish", "Pelagic Fish","Marine Fish, Other","Animal fats",
+"Crustaceans", "Cephalopods", "Molluscs, Other", "Aquatic Animals, Others",
+"Milk - Excluding Butter","Beans", "Peas", "Pulses, Other and products", "Soyabeans",
+"Nuts and products", "Groundnuts", "Sunflower seed", "Rape and Mustardseed", "Cottonseed",
+"Coconuts - Incl Copra", "Sesame seed", "Palm kernels",
+"Oilcrops, Other", "Cocoa Beans and products", "Tomatoes and products", "Onions",
+"Vegetables, other", "Oranges,  Mandarines", "Lemons, Limes and products", "Grapefruit and products",
+ "Citrus, Other", "Bananas", "Plantains", "Apples and products", "Pineapples and products",
+"Dates", "Grapes and products (excl wine)",  "Fruits, other", "Pepper","Pimento",
+"Oranges, Mandarines", "Cloves", "Sugar cane", "Sugar beet", "Sugar non-centrifugal",
+"Sugar (Raw Equivalent)", "Honey", "Sweeteners, Other", "Grand Total"
+)
+data2 <- data %>%
+  filter(Item %in% items_to_keep)
+#######################
+#convert to numeric
+# Year and Value were text; as.numeric() turns any remaining non-numeric entries into NA (with a warning).
+data2$Year<- as.numeric(data2$Year)
+data2$Value<- as.numeric(data2$Value)
+
+print(data2)
+unique(data2$Item)
+unique(data2$Item)
+#######################
+# Remove rows where Value is "X"
+data2 <- data2 %>%
+  filter(Value != "X")
+
+print(data2)
+#######################
+#Filter the years 1990-2013
+unique(data2$Year)
+
+data2 <- data2 %>%
+  filter(Year >= 1990 & Year <= 2013)
+
+print(data2)
+#######################
+#select the Food supply quantity (kg/capita/yr)
+# Keep food supply quantity only (kg per person per year).
+supply_data2 <- data2 %>% filter(Element  == "Food supply quantity (kg/capita/yr)")
+print(supply_data2)
+#######################
+#CONVERT from kg/capita/yr to grams/capita/day
+supply_data2_grams <- supply_data2 %>%
+# kg/capita/year -> g/capita/day (x1000 g, /365 days; leap years ignored).
+  mutate(g_capita = (Value * 1000) / 365)   #creates a new column Value_g_per_day
+
+print(supply_data2_grams)
+#######################
+#Combine food items into food groups
+# Map each food item to a food group using case_when(); items not listed become NA.
+group_supply <- supply_data2_grams %>%
+  mutate(Food_Group = case_when(
+
+# Cereals
+    Item %in% c("Wheat and products", "Rice and products", "Barley and products",
+                "Maize and products", "Rye and products", "Oats", "Millet and products",
+                "Sorghum and products", "Cereals, other") ~ "Cereals",
+
+ #roots
+  Item %in% c("Potatoes and products", "Cassava and products", "Sweet potatoes",
+              "Roots, Other", "Yams", "Starchy Roots") ~ "Roots",
+
+
+ # Oils
+    Item %in% c("Fish, Liver Oil", "Fish, Body Oil", "Cream", "Butter, Ghee",
+                "Fats, Animals, Raw", "Oilcrops Oil, Other", "Maize Germ Oil",
+                "Ricebran Oil", "Olive Oil", "Sesameseed Oil", "Coconut Oil",
+                "Palm Oil", "Palmkernel Oil", "Cottonseed Oil", "Rape and Mustard Oil",
+                "Sunflowerseed Oil", "Groundnut Oil", "Soyabean Oil", "Animal fats") ~ "Oils",
+
+  # Animal products
+    Item %in% c("Bovine Meat", "Mutton & Goat Meat", "Pigmeat", "Poultry Meat",
+                "Meat, Other", "Offals, Edible") ~ "Meat and products",
+
+# Eggs
+    Item %in% c("Eggs") ~ "Eggs",
+
+
+# Fish
+    Item %in% c("Freshwater Fish", "Demersal Fish", "Pelagic Fish",
+  "Marine Fish, Other", "Crustaceans", "Cephalopods", "Molluscs, Other",
+  "Aquatic Animals, Others") ~ "Fish",
+
+
+# Dairy
+ Item %in% c("Milk - Excluding Butter") ~ "Dairy",
+
+    # Pulses
+ Item %in% c("Beans", "Peas", "Pulses, Other and products", "Soyabeans") ~ "Pulses",
+
+     #Nuts and seeds
+ Item %in% c("Nuts and products", "Groundnuts", "Groundnuts (Shelled Eq)", "Sunflower seed",
+             "Rape and Mustardseed", "Cottonseed", "Coconuts - Incl Copra", "Sesame seed", "Palm kernels",
+             "Oilcrops, Other", "Cocoa Beans and products") ~ "Nuts",
+
+
+# Fruits and vegetables
+    Item %in% c("Tomatoes and products", "Onions", "Vegetables, other", "Oranges,
+                Mandarines", "Lemons, Limes and products", "Grapefruit and products",
+                "Citrus, Other", "Bananas", "Plantains", "Apples and products",
+                "Pineapples and products", "Dates", "Grapes and products (excl wine)",
+                "Fruits, other", "Pepper","Pimento", "Oranges, Mandarines", "Cloves") ~ "Fruit and vegetables",
+
+# Sweets and sugar
+    Item %in% c("Sugar cane", "Sugar beet", "Sugar non-centrifugal", "Sugar (Raw Equivalent)",
+                "Honey", "Sweeteners, Other") ~ "Sweets and sugar",
+
+ #Grand Total
+ Item %in% c("Grand Total") ~ "Total",
+
+    TRUE ~ NA_character_    # To catch unmatched values
+  ))
+
+
+print(group_supply)
+#######################
+NA_items <- print(group_supply)   %>%
+  filter(is.na(Food_Group)) %>%
+  distinct(Item)
+
+print(NA_items)
+#######################
+# Combine items into grouped categories using case_when
+unique(group_supply$Food_Group)
+# Food groups kept for the analysis ("Total" is excluded here).
+food_groups <- c("Cereals", "Roots", "Fruit and vegetables", "Pulses", "Nuts",
+                       "Meat and products", "Eggs", "Dairy", "Fish", "Sweets and sugar", "Oils")
+
+# Filter and group
+# Collapse into 8 analysis groups (meat, eggs, dairy and fish -> "Animal Sources") and
+# sum g/capita/day per Region x Year x group. Result: food_suppl_old (1990-2013).
+food_suppl_old <- group_supply %>%
+  filter(!is.na(Food_Group), Food_Group %in% food_groups) %>%  # Keep only valid groups
+  mutate(Grouped_Item = case_when(
+    Food_Group == "Cereals" ~ "Cereals",
+    Food_Group == "Roots" ~ "Starchy Roots",
+    Food_Group == "Fruit and vegetables" ~ "Fruit and vegetables",
+    Food_Group == "Pulses" ~ "Pulses",
+     Food_Group == "Nuts" ~ "Nuts & seeds",
+    Food_Group %in% c("Meat and products", "Eggs", "Dairy", "Fish") ~ "Animal Sources",
+    Food_Group == "Sweets and sugar" ~ "Sweets and Sugar",
+    Food_Group == "Oils" ~ "Oils",
+    TRUE ~ NA_character_  # To catch unmatched values
+  )) %>%
+  group_by(Region, Year, Grouped_Item) %>%
+  summarise(g_capita = sum(g_capita, na.rm = TRUE), .groups = "drop")
+
+print(food_suppl_old )
+unique(food_suppl_old $Region)
+unique(food_suppl_old $Grouped_Item)
+
+
+
+#############################################################################################################################################################
+#####################################################################################################################################################
+#############################################################################################################################################################
+#####################################################################################################################################################
+
+
+#Load dataset 2010-2022
+# ---- 1b. FOOD SUPPLY: CURRENT FAO FOOD BALANCE SHEETS (2010-2022) ----
+# Same as above for the newer FAO release. Values are stored in "Value_new" /
+# "g_capita_new" so the two releases can be compared in the overlap years (2010-2013).
+all_data2 <- read_excel(file.path(DATA_DIR, "FoodBalanceSheets_E_All_Data_new.xlsx"))
+View(all_data2)
+print(all_data2)
+#######################
+#clean data
+all_data_new <- all_data2 %>%
+  pivot_longer(cols = starts_with("Y20"), names_to = "Year", values_to = "Value_new")
+
+print(all_data_new)
+#######################
+# Remove rows where Value is "X" and NA
+all_data_new <- all_data_new %>%
+# Removes "X" and the text "NA". (Real NA values are dropped by filter() automatically.)
+  filter(Value_new != "X" & Value_new != "NA")
+
+print(all_data_new)
+#######################
+#Remove "Y" from Year column
+all_data_new <- all_data_new %>%
+  mutate(Year = str_remove(Year, "^Y"))
+
+print(all_data_new)
+#######################
+# Remove unnecessary columns
+colnames(all_data_new)
+
+columns_to_remove2 <- c("Area Code (M49)", "Area Code", "Item Code", "Item Code (FBS)", "Element Code")
+all_data_new <- all_data_new %>% select(-all_of(columns_to_remove2))
+
+print(all_data_new)
+
+#Rename Area to Region
+names(all_data_new)[names(all_data_new) == "Area"] <- "Region"
+
+print(all_data_new)
+unique(all_data_new$Item)
+unique(all_data_new$Element)
+unique(all_data_new$Region)
+#######################
+#select countries
+regions_to_keep2 <- c(
+  "Angola", "Benin", "Botswana", "Burkina Faso", "Cabo Verde", "Cameroon",
+  "Central African Republic", "Chad", "Congo", "CÃ´te d'Ivoire",
+  "Eswatini", "Ethiopia", "Gabon", "Gambia", "Sao Tome and Principe",
+  "Ghana", "Guinea", "Guinea-Bissau", "Kenya", "Lesotho", "Liberia", "Madagascar",
+  "Malawi", "Mali", "Mauritania", "Mauritius", "Mozambique", "Namibia", "Niger",
+  "Nigeria", "Rwanda", "Senegal", "Sierra Leone", "South Africa",
+  "Togo", "Uganda",  "Zambia", "Zimbabwe", "United Republic of Tanzania", "World"
+)
+all_data_new2 <- all_data_new %>%
+  filter(Region %in% regions_to_keep2)
+
+all_data_new2$Region[all_data_new2$Region == "Congo"] <- "Congo, Rep."
+all_data_new2$Region[all_data_new2$Region ==  "United Republic of Tanzania"] <- "Tanzania"
+all_data_new2$Region[all_data_new2$Region ==  "Gambia"] <- "Gambia, The"
+all_data_new2$Region[all_data_new2$Region ==  "CÃ´te d'Ivoire"] <- "Cote d'Ivoire"
+
+unique(all_data_new2$Region)
+#######################
+#Elements to keep
+elements_to_keep2 <- c(
+ "Food supply quantity (kg/capita/yr)", "Food supply (kcal/capita/day)", "Export Quantity", "Production",
+  "Import Quantity", "Processing", "Losses", "Feed", "Seed", "Other uses (non-food)"
+)
+data_new <- all_data_new2 %>%
+  filter(Element %in% elements_to_keep2)
+
+unique(data_new$Element)
+#######################
+##standardise element names
+# Harmonise element names: the newer database writes "Import quantity"/"Export quantity" in lower case.
+data_new <- data_new %>%
+ mutate(Element = ifelse(Element == "Import quantity", "Import Quantity", Element),
+        Element = ifelse(Element == "Export quantity", "Export Quantity", Element))
+#######################
+#Items to keep
+unique(data_new$Item)
+
+items_to_keep2 <- c("Wheat and products", "Rice and products", "Barley and products", "Maize and products",
+"Rye and products", "Oats", "Millet and products", "Sorghum and products",
+"Cereals, other","Potatoes and products", "Cassava and products", "Sweet potatoes",
+"Roots, Other", "Yams", "Starchy Roots", "Fish, Liver Oil", "Fish, Body Oil",
+"Cream", "Butter, Ghee", "Fats, Animals, Raw", "Oilcrops Oil, Other", "Maize Germ Oil",
+"Ricebran Oil", "Olive Oil", "Sesameseed Oil", "Coconut Oil", "Palm Oil", "Palmkernel Oil",
+"Cottonseed Oil", "Rape and Mustard Oil",  "Sunflowerseed Oil", "Groundnut Oil", "Soyabean Oil",
+"Bovine Meat", "Mutton & Goat Meat", "Pigmeat", "Poultry Meat", "Meat, Other", "Offals, Edible",
+"Eggs","Freshwater Fish", "Demersal Fish", "Pelagic Fish","Marine Fish, Other","Animal fats",
+"Crustaceans", "Cephalopods", "Molluscs, Other", "Aquatic Animals, Others",
+"Milk - Excluding Butter","Beans", "Peas", "Pulses, Other and products", "Soyabeans",
+"Nuts and products", "Groundnuts", "Sunflower seed", "Rape and Mustardseed", "Cottonseed",
+"Coconuts - Incl Copra", "Sesame seed", "Palm kernels",
+"Oilcrops, Other", "Cocoa Beans and products", "Tomatoes and products", "Onions",
+"Vegetables, other", "Oranges,  Mandarines", "Lemons, Limes and products", "Grapefruit and products",
+ "Citrus, Other", "Bananas", "Plantains", "Apples and products", "Pineapples and products",
+"Dates", "Grapes and products (excl wine)",  "Fruits, other", "Pepper","Pimento",
+"Oranges, Mandarines", "Cloves", "Sugar cane", "Sugar beet", "Sugar non-centrifugal",
+"Sugar (Raw Equivalent)", "Honey", "Sweeteners, Other", "Grand Total"
+)
+data_new <- data_new %>%
+  filter(Item %in% items_to_keep2)
+#######################
+#convert to numeric
+data_new$Year<- as.numeric(data_new$Year)
+data_new$Value_new<- as.numeric(data_new$Value_new)
+
+print(data_new)
+#######################
+# Remove rows where Value is "X"
+data_new <- data_new %>%
+  filter(Value_new != "NA")
+
+print(data_new)
+#######################
+#Filter the years 2010-2022
+unique(data_new$Year)
+#######################
+#select the Food supply quantity (kg/capita/yr
+supply_data_new <- data_new %>% filter(Element  == "Food supply quantity (kg/capita/yr)")
+print(supply_data2)
+
+#######################
+#CONVERT from kg/capita/yr to grams/capita/day
+supply_data_new_grams <- supply_data_new %>%
+  mutate(g_capita_new = (Value_new * 1000) / 365)   #creates a new column Value_g_per_day
+
+print(supply_data_new_grams)
+
+#######################
+#Combine food items into food groups
+group_supply_new <- supply_data_new_grams %>%
+  mutate(Food_Group = case_when(
+
+# Cereals
+    Item %in% c("Wheat and products", "Rice and products", "Barley and products",
+                "Maize and products", "Rye and products", "Oats", "Millet and products",
+                "Sorghum and products", "Cereals, other") ~ "Cereals",
+
+ #roots
+  Item %in% c("Potatoes and products", "Cassava and products", "Sweet potatoes",
+              "Roots, Other", "Yams", "Starchy Roots") ~ "Roots",
+
+
+ # Oils
+    Item %in% c("Fish, Liver Oil", "Fish, Body Oil", "Cream", "Butter, Ghee",
+                "Fats, Animals, Raw", "Oilcrops Oil, Other", "Maize Germ Oil",
+                "Ricebran Oil", "Olive Oil", "Sesameseed Oil", "Coconut Oil",
+                "Palm Oil", "Palmkernel Oil", "Cottonseed Oil", "Rape and Mustard Oil",
+                "Sunflowerseed Oil", "Groundnut Oil", "Soyabean Oil", "Animal fats") ~ "Oils",
+
+  # Animal products
+    Item %in% c("Bovine Meat", "Mutton & Goat Meat", "Pigmeat", "Poultry Meat",
+                "Meat, Other", "Offals, Edible") ~ "Meat and products",
+
+# Eggs
+    Item %in% c("Eggs") ~ "Eggs",
+
+
+# Fish
+    Item %in% c("Freshwater Fish", "Demersal Fish", "Pelagic Fish",
+  "Marine Fish, Other", "Crustaceans", "Cephalopods", "Molluscs, Other",
+  "Aquatic Animals, Others") ~ "Fish",
+
+
+# Dairy
+ Item %in% c("Milk - Excluding Butter") ~ "Dairy",
+
+    # Pulses
+ Item %in% c("Beans", "Peas", "Pulses, Other and products", "Soyabeans") ~ "Pulses",
+
+     #Nuts and seeds
+ Item %in% c("Nuts and products", "Groundnuts", "Groundnuts (Shelled Eq)", "Sunflower seed",
+             "Rape and Mustardseed", "Cottonseed", "Coconuts - Incl Copra", "Sesame seed", "Palm kernels",
+             "Oilcrops, Other", "Cocoa Beans and products") ~ "Nuts",
+
+
+# Fruits and vegetables
+    Item %in% c("Tomatoes and products", "Onions", "Vegetables, other", "Oranges,
+                Mandarines", "Lemons, Limes and products", "Grapefruit and products",
+                "Citrus, Other", "Bananas", "Plantains", "Apples and products",
+                "Pineapples and products", "Dates", "Grapes and products (excl wine)",
+                "Fruits, other", "Pepper","Pimento", "Oranges, Mandarines", "Cloves") ~ "Fruit and vegetables",
+
+# Sweets and sugar
+    Item %in% c("Sugar cane", "Sugar beet", "Sugar non-centrifugal", "Sugar (Raw Equivalent)",
+                "Honey", "Sweeteners, Other") ~ "Sweets and sugar",
+
+ #Grand Total
+ Item %in% c("Grand Total") ~ "Total",
+
+    TRUE ~ NA_character_     # To catch unmatched values
+  ))
+
+
+print(group_supply_new)
+#######################
+#check for unmatched items.
+NA_items <- print(group_supply_new)   %>%
+  filter(is.na(Food_Group)) %>%
+  distinct(Item)
+
+print(NA_items)
+#######################
+# Combine items into grouped categories using case_when
+unique(group_supply_new$Food_Group)
+# Define the food groups of interest
+food_groups <- c("Cereals", "Roots", "Fruit and vegetables", "Pulses", "Nuts",
+                       "Meat and products", "Eggs", "Dairy", "Fish", "Sweets and sugar", "Oils")
+#######################
+# Filter and group
+# Same grouping as for the old file. Result: food_suppl_new (2010-2022).
+food_suppl_new <- group_supply_new %>%
+  filter(!is.na(Food_Group), Food_Group %in% food_groups) %>%  # Keep only valid groups
+  mutate(Grouped_Item = case_when(
+    Food_Group == "Cereals" ~ "Cereals",
+    Food_Group == "Roots" ~ "Starchy Roots",
+    Food_Group == "Fruit and vegetables" ~ "Fruit and vegetables",
+    Food_Group == "Pulses" ~ "Pulses",
+     Food_Group == "Nuts" ~ "Nuts & seeds",
+    Food_Group %in% c("Meat and products", "Eggs", "Dairy", "Fish") ~ "Animal Sources",
+    Food_Group == "Sweets and sugar" ~ "Sweets and Sugar",
+    Food_Group == "Oils" ~ "Oils",
+    TRUE ~ NA_character_  # To catch unmatched values
+  )) %>%
+  group_by(Region, Year, Grouped_Item) %>%
+  summarise(g_capita_new = sum(g_capita_new, na.rm = TRUE), .groups = "drop")
+
+print(food_suppl_new )
+unique(food_suppl_new $Region)
+unique(food_suppl_new $Grouped_Item)
+
+
+```
+
+
+# Merge and offset food supply data
+```{r}
+# Filter overlapping years
+print(food_suppl_new)
+print(food_suppl_old)
+
+# ---- 2. HARMONISE THE TWO FAO RELEASES ----
+# The releases overlap in 2010-2013. Values differ slightly because of revisions, so the old series
+# is rescaled to the new release using the ratio of the overlap-year means. The result is one
+# continuous 1990-2022 series (my_data).
+old_overlap <- food_suppl_old %>% filter(Year >= 2010 & Year <= 2013)
+new_overlap <- food_suppl_new %>% filter(Year >= 2010 & Year <= 2013)
+print(old_overlap)
+print(new_overlap)
+#######################
+# Create SSA average
+# SSA average = simple (unweighted) mean over all countries except "World".
+ssa_avg_overlap1 <- old_overlap %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Grouped_Item) %>%
+  summarise(value_old = mean(g_capita, na.rm = TRUE)) %>%
+  mutate(Region = "SSA")
+
+print(ssa_avg_overlap1)
+
+ssa_avg_overlap2 <- new_overlap %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Grouped_Item) %>%
+  summarise(value_new = mean(g_capita_new, na.rm = TRUE)) %>%
+  mutate(Region = "SSA")
+
+print(ssa_avg_overlap2)
+#######################
+# Merge the overlapping datasets
+merged_overlap <- ssa_avg_overlap1 %>%
+  full_join(ssa_avg_overlap2, by = c("Region", "Year", "Grouped_Item"))
+print(merged_overlap)
+#######################
+# Reshape for plotting
+plot_data <- merged_overlap %>%
+  pivot_longer(cols = c(value_new, value_old ),
+               names_to = "Source",
+               values_to = "g_capita_value")
+print(plot_data)
+#######################
+# Plot
+# Bar chart comparing old vs new release in the overlap years (visual check of the offset).
+plot_overlap <- ggplot(plot_data, aes(x = Grouped_Item, y = g_capita_value, fill = Source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Year + Region, scales = "free_x") +
+  theme_minimal() +
+  labs(title = "Comparison of values of overlapping years between old and new FAO_FBS",
+       x = "Food Group",
+       y = "Grams/person/capita",
+       fill = "Data Source") +
+  theme(axis.text.x = element_text(size = 20, angle = 45, hjust = 1),
+        legend.position = "bottom",
+        axis.text.y = element_text(size = 20),
+    legend.title = element_text(size = 22),
+    axis.title.x = element_text(size = 22),
+     axis.title.y = element_text(size = 22),
+    legend.text = element_text(size = 22),
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+    strip.text = element_text(size = 22),
+        panel.spacing = unit(2, "cm"))
+
+print(plot_overlap)
+
+
+png(file.path(FIG_DIR, "Comparison.png"),
+    width = 20, height = 18, units = "in", res = 1200)
+grid.draw(plot_overlap)
+dev.off()
+#######################
+# Join overlapping datasets
+joined_overlap <- inner_join(old_overlap , new_overlap ,
+                            by = c("Region", "Grouped_Item", "Year"))
+
+print(joined_overlap)
+
+#######################
+# Calculate offset by region_item
+# Offset = mean(new) / mean(old) over 2010-2013, per Region x food group.
+offset_ratios <- joined_overlap %>%
+  group_by(Region, Grouped_Item) %>%
+  summarise(offset_ratio = mean(g_capita_new, na.rm = TRUE) / mean(g_capita, na.rm = TRUE))
+
+offset_ratios
+#######################
+#apply offset ratio to newdatapre
+# Rescale the old series by the offset (unchanged where no ratio is available).
+old_adjusted <- food_suppl_old %>%
+  left_join(offset_ratios, by = c("Region", "Grouped_Item")) %>%
+  mutate(g_capita_adj = ifelse(!is.na(offset_ratio),
+                         g_capita * offset_ratio,
+                         g_capita))
+
+print(old_adjusted)
+#######################
+# Keep only adjusted values
+food_suppl_adj <- old_adjusted %>%
+  select(Region, Year, Grouped_Item, g_adj_old = g_capita_adj)
+#######################
+#filter 2014_2022:
+# Years after the overlap come straight from the new database.
+data_2014_2022 <- food_suppl_new %>%
+  filter(Year >= 2014, Year <= 2022)
+
+print(data_2014_2022)
+#######################
+# Combine adjusted old and new data
+# Stack adjusted old data (1990-2013) and new data (2014-2022).
+my_data <- bind_rows(data_2014_2022, food_suppl_adj)
+print(my_data)
+unique(my_data$Year)
+#######################
+#Keep only one value
+my_data <- my_data %>%
+# Each row has either a new or an adjusted-old value; coalesce() merges them into one "value" column.
+# Result: my_data = Region x Year x food group, g/capita/day, 1990-2022.
+  mutate(value = coalesce(g_capita_new, g_adj_old)) %>%
+  select(-g_capita_new, -g_adj_old)
+
+print(my_data)
+unique(my_data$Year)
+
+```
+
+
+```{r}
+print(data2)
+print(data_new)
+unique(data_new$Element)
+unique(data2$Element)
+unique(data_new$Item)
+unique(data2$Item)
+unique(data_new$Year)
+unique(data2$Year)
+#######################
+# ---- 2b. SAME HARMONISATION FOR TOTAL ENERGY SUPPLY ("Grand Total", kcal/capita/day) ----
+energy_old <- data2 %>% filter(Item  == "Grand Total")
+print(energy_old)
+
+energy_new <- data_new %>% filter(Item  == "Grand Total")
+print(energy_new)
+#######################
+unique(energy_new$Element)
+unique(energy_old$Element)
+unique(energy_new$Item)
+unique(energy_old$Item)
+print(energy_old)
+print(energy_new)
+#######################
+old_energy_overlap <- energy_old %>% filter(Year >= 2010 & Year <= 2013)
+new_energy_overlap <- energy_new %>% filter(Year >= 2010 & Year <= 2013)
+print(old_energy_overlap)
+print(new_energy_overlap)
+#######################
+# Create SSA average
+ssa_avg_energy_1 <- old_energy_overlap %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Item) %>%
+  summarise(value_old = mean(Value, na.rm = TRUE)) %>%
+  mutate(Region = "SSA")
+
+print(ssa_avg_energy_1)
+
+ssa_avg_energy_2 <- new_energy_overlap %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Item) %>%
+  summarise(value_new = mean(Value_new, na.rm = TRUE)) %>%
+  mutate(Region = "SSA")
+
+print(ssa_avg_energy_2)
+#######################
+#plot
+# Merge the overlapping datasets
+merged_energy_overlap <- ssa_avg_energy_1 %>%
+  full_join(ssa_avg_energy_2, by = c("Region", "Year", "Item"))
+print(merged_energy_overlap)
+#######################
+# Reshape for plotting
+plot_energy_data <- merged_energy_overlap %>%
+  pivot_longer(cols = c(value_new, value_old ),
+               names_to = "Source",
+               values_to = "value")
+print(plot_energy_data)
+
+#######################
+plot_energy_overlap <- ggplot(plot_energy_data, aes(x = Item, y = value, fill = Source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Year + Region, scales = "free_x") +
+  theme_minimal() +
+  labs(title = "Comparison of values of overlapping years between old and new FAO_FBS",
+       x = "Food Group",
+       y = "Grand total",
+       fill = "Data Source") +
+  theme(axis.text.x = element_text(size = 20, angle = 45, hjust = 1),
+        legend.position = "bottom",
+        axis.text.y = element_text(size = 20),
+    legend.title = element_text(size = 22),
+    axis.title.x = element_text(size = 22),
+     axis.title.y = element_text(size = 22),
+    legend.text = element_text(size = 22),
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+    strip.text = element_text(size = 22),
+        panel.spacing = unit(2, "cm"))
+
+print(plot_energy_overlap)
+#######################
+# Join overlapping datasets
+joined_energy_overlap <- inner_join(old_energy_overlap , new_energy_overlap ,
+                            by = c("Region", "Item", "Year"))
+
+print(joined_energy_overlap)
+#######################
+# Calculate offset by region_item
+offset_energy_ratios <- joined_energy_overlap %>%
+  group_by(Region, Item) %>%
+  summarise(offset_ratio = mean(Value_new, na.rm = TRUE) / mean(Value, na.rm = TRUE))
+
+offset_energy_ratios
+#######################
+#apply offset ratio to newdatapre
+old_energy_adjusted <- energy_old %>%
+  left_join(offset_energy_ratios, by = c("Region", "Item")) %>%
+  mutate(value_energy_adj = ifelse(!is.na(offset_ratio),
+                         Value * offset_ratio,
+                         Value))
+
+print(old_energy_adjusted)
+#######################
+
+# Keep only adjusted values
+energy_adjusted <- old_energy_adjusted%>%
+  select(Region, Year, Item, value_adj = value_energy_adj)
+#######################
+#filter 2014_2022:
+energy_2014_2022 <- energy_new %>%
+  filter(Year >= 2014, Year <= 2022)
+print(energy_2014_2022)
+#######################
+# Combine adjusted old and new data
+# Combined 1990-2022 energy series.
+energy_data <- bind_rows(energy_adjusted, energy_2014_2022)
+print(energy_data)
+unique(energy_data$Year)
+#######################
+#Keep only one value
+energy_data <- energy_data %>%
+  mutate(value = coalesce(Value_new, value_adj)) %>%
+  select(-Value_new, -value_adj)
+
+print(energy_data)
+
+unique(energy_data$Year)
+
+```
+
+
+# food supply trends
+```{r}
+########################################
+#Filter data
+unique(my_data$ Grouped_Item)
+unique(my_data$Region)
+unique(my_data$Year)
+
+print(my_data)
+
+#######################
+# Create SSA average
+# ---- 3. FOOD SUPPLY TRENDS: SSA AVERAGE vs KENYA vs WORLD ----
+# SSA average = unweighted mean across countries (World excluded; Kenya included).
+ssa_avg <- my_data %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Grouped_Item) %>%
+  summarise(value = mean(value, na.rm = TRUE)) %>%
+  mutate(Region = "SSA")
+
+print(ssa_avg)
+unique(ssa_avg$Grouped_Item)
+unique(ssa_avg$Region)
+unique(ssa_avg$Year)
+#######################
+# Extract Kenya and World data
+kenya_data <- my_data %>% filter(Region == "Kenya")
+world_data <- my_data %>% filter(Region == "World")
+
+print(kenya_data)
+unique(kenya_data$Grouped_Item)
+unique(kenya_data$Region)
+unique(kenya_data$Year)
+
+print(world_data)
+unique(world_data$Grouped_Item)
+unique(world_data$Region)
+unique(world_data$Year)
+#######################
+# Combine all for plotting
+# One data frame with the three series to plot.
+combined_supply <- bind_rows(kenya_data, ssa_avg, world_data)
+
+print(combined_supply)
+unique(combined_supply$Grouped_Item)
+unique(combined_supply$Region)
+unique(combined_supply$Year)
+
+print(
+  ggplot(combined_supply %>% filter(Grouped_Item == "Cereals"),
+       aes(x = Year, y = value, color = Region)) +
+  geom_line() +
+  labs(title = "Adjusted Trend for Cereals")
+)
+#######################
+# Create the plot with customized colors and line types
+# Line chart per food group (free y-axes), coloured by region.
+supply_plot <- ggplot(combined_supply, aes(x = Year, y = value, color = Region, linetype = Region)) +
+  geom_line(linewidth = 1) +  # <-- fixed here
+  scale_color_manual(values = c("Kenya" = "purple", "World" = "green", "SSA" = "blue")) +
+  scale_linetype_manual(values = c("Kenya" = "dotdash", "World" = "longdash",  "SSA" = "solid")) +
+  scale_x_continuous(breaks = seq(1990, 2022, by = 3)) +
+  facet_wrap(~Grouped_Item, scales = "free_y") +
+  theme_minimal(base_size = 22) +
+  theme(
+    axis.text.x = element_text(size = 22, angle = 45, hjust = 1),
+    legend.position = "bottom",
+    legend.title = element_text(size = 22),
+    legend.text = element_text(size = 22),
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+    strip.text = element_text(size = 22),
+    plot.margin = margin(t = 10, r = 10, b = 20, l = 10)
+  ) +
+  labs(
+    title = "Food supply trend 1990–2022",
+    y = "Value (g/person/day)",
+    x = "Year"
+  )
+
+print(supply_plot)
+#######################
+#save
+png(file.path(FIG_DIR, "supply trend.png"),
+    width = 20, height = 14, units = "in", res = 1200)
+grid.draw(supply_plot)
+dev.off()
+#######################
+# create eta-lancet ranges
+# EAT-Lancet reference values in g/day: recommended range (Lower-Upper) and target per food group.
+eat_targets <- tibble::tibble(
+  Grouped_Item = c("Sweets and Sugar", "Cereals", "Fruit and vegetables",
+                   "Pulses", "Nuts & seeds", "Animal Sources","Starchy Roots"),
+  Lower = c(0, 58, 100, 18.75, 12.5, 14, 12.5),
+  Upper = c(31, 232, 600, 150, 100, 334, 100),
+  Target = c(15, 116, 300, 75, 50, 157, 50)
+)
+#######################
+#subset for 1992
+ssa_subset_1992 <- ssa_avg %>%
+  filter(Year == 1992)
+print(ssa_subset_1992)
+
+ssa_992 <- ssa_subset_1992 %>%
+  filter(Grouped_Item != "Oils")
+print(ssa_992)
+
+
+plot_data_92 <- ssa_992 %>%
+  left_join(eat_targets, by = "Grouped_Item")
+
+#######################
+#subset for 2022
+ssa_subset_2022 <- ssa_avg %>%
+  filter(Year ==2022)
+print(ssa_subset_2022)
+
+ssa_022 <- ssa_subset_2022 %>%
+  filter(Grouped_Item != "Oils")
+print(ssa_022)
+
+plot_data_2022 <- ssa_022 %>%
+  left_join(eat_targets, by = "Grouped_Item")
+print(plot_data_2022)
+#######################
+# Combine
+# Both years in one table for plotting.
+combined_EAT <- bind_rows(plot_data_2022, plot_data_92)
+print(combined_EAT )
+
+# Grey box = recommended range, dashed line = target, triangle/diamond = observed SSA mean intake.
+EAT_ref <- ggplot(combined_EAT, aes(x = Grouped_Item)) +
+  # Recommended range (grey rectangle)
+  geom_rect(aes(xmin = as.numeric(factor(Grouped_Item)) - 0.3,
+                xmax = as.numeric(factor(Grouped_Item)) + 0.3,
+                ymin = Lower, ymax = Upper),
+            fill = "grey90", color = "grey70") +
+
+  # Target (dashed line)
+  geom_segment(aes(x = as.numeric(factor(Grouped_Item)) - 0.3,
+                   xend = as.numeric(factor(Grouped_Item)) + 0.3,
+                   y = Target, yend = Target),
+               linetype = "dashed", color = "black") +
+
+  # Mean intakes (diamonds for each year)
+  geom_point(aes(y = value, shape = as.factor(Year), color = as.factor(Year)),
+             size = 4) +
+
+ # Customize shapes and colors
+  scale_shape_manual(values = c("1992" = 17, "2022" = 18)) +
+  scale_color_manual(values = c("1992" = "blue", "2022" = "red")) +
+
+  # Axis and labels
+  labs(title = "EAT-Lancet recommendations vs mean intake in SSA (1992 & 2022)",
+       y = "g/capita/day", x = "",
+       shape = "Year", color = "Year") +
+
+  theme_minimal(base_size = 24) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 20),
+    axis.text.y = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20),
+    plot.title = element_text(size = 20, face = "bold")
+  )
+
+print(EAT_ref)
+#######################
+#save
+png(file.path(FIG_DIR, "EAT_ref.png"),
+    width = 20, height = 14, units = "in", res = 1200)
+grid.draw(EAT_ref)
+dev.off()
+
+#######################
+#Globally
+#subset for 1992
+
+# Same comparison for the global average.
+world_subset_1992 <- world_data %>%
+  filter(Year == 1992)
+print(world_subset_1992)
+
+world_992 <-world_subset_1992 %>%
+  filter(Grouped_Item != "Oils")
+print(world_992)
+
+
+world_data_92 <- world_992 %>%
+  left_join(eat_targets, by = "Grouped_Item")
+#######################
+#2022
+world_subset_2022 <- world_data %>%
+  filter(Year ==2022)
+print(world_subset_2022)
+
+world_022 <- world_subset_2022 %>%
+  filter(Grouped_Item != "Oils")
+print(world_022)
+
+
+world_data_022 <- world_022 %>%
+  left_join(eat_targets, by = "Grouped_Item")
+print(world_data_022)
+#######################
+# Combine
+combined_EAT_world <- bind_rows(world_data_022, world_data_92 )
+print(combined_EAT_world )
+
+#######################
+EAT_ref_world <- ggplot(combined_EAT_world, aes(x = Grouped_Item)) +
+  # Recommended range (grey rectangle)
+  geom_rect(aes(xmin = as.numeric(factor(Grouped_Item)) - 0.3,
+                xmax = as.numeric(factor(Grouped_Item)) + 0.3,
+                ymin = Lower, ymax = Upper),
+            fill = "grey90", color = "grey70") +
+
+  # Target (dashed line)
+  geom_segment(aes(x = as.numeric(factor(Grouped_Item)) - 0.3,
+                   xend = as.numeric(factor(Grouped_Item)) + 0.3,
+                   y = Target, yend = Target),
+               linetype = "dashed", color = "black") +
+
+  # Mean intakes (diamonds for each year)
+  geom_point(aes(y = value, shape = as.factor(Year), color = as.factor(Year)),
+             size = 4) +
+
+ # Customize shapes and colors
+  scale_shape_manual(values = c("1992" = 17, "2022" = 18)) +
+  scale_color_manual(values = c("1992" = "blue", "2022" = "red")) +
+
+  # Axis and labels
+  labs(title = "EAT-Lancet recommendations vs mean intake globally (1992 & 2022)",
+       y = "g/capita/day", x = "",
+       shape = "Year", color = "Year") +
+
+  theme_minimal(base_size = 24) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 20),
+    axis.text.y = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20),
+    plot.title = element_text(size = 20, face = "bold")
+  )
+
+print(EAT_ref_world)
+
+# patchwork: "/" stacks the two plots vertically (world on top, SSA below).
+combined_plot <- EAT_ref_world / EAT_ref
+print(combined_plot)
+#######################
+#save
+png(file.path(FIG_DIR, "combined_plot.png"),
+    width = 16, height = 18, units = "in", res = 1200)
+grid.draw(combined_plot)
+dev.off()
+```
+
+# Bar garph
+```{r}
+
+# Define items and countries of interest
+# Food groups and regions shown in the stacked share chart.
+items_selected <- c("Animal Sources", "Cereals", "Starchy Roots", "Fruit and vegetables", "Oils", "Pulses", "Nuts & seeds", "Sweets and Sugar")
+countries_selected <- c("Kenya", "SSA", "World")
+#######################
+# Filter combined data for items and countries of interest
+print(combined_supply )
+
+food_supply_bar <- combined_supply  %>%
+  filter(Grouped_Item %in% items_selected, Region %in% countries_selected) %>%
+  mutate(Year = as.numeric(Year),  value = as.numeric( value)) %>%
+  arrange(Region, Grouped_Item, Year)
+#######################
+# calculate percentages
+# Share of each group (%) within Region x Year.
+# NOTE: the denominator is the sum of the 8 selected groups only, not the total diet.
+data_pct_grouped <- food_supply_bar %>%
+  group_by(Region, Year) %>%
+  mutate(Percent = ( value/ sum( value)) * 100) %>%
+  ungroup()
+#######################
+#Arrange the food groups
+data_pct_grouped$Grouped_Item <- factor(
+  data_pct_grouped$Grouped_Item,
+  levels = c(
+   "Sweets and Sugar",
+    "Oils",
+    "Animal Sources",
+    "Pulses",
+    "Nuts & seeds",
+    "Fruit and vegetables",
+    "Starchy Roots",
+    "Cereals"
+  )
+)
+#######################
+# Plot with grouped items
+data_pct_grouped$Year <- factor(data_pct_grouped$Year, levels = sort(unique(data_pct_grouped$Year), decreasing = TRUE))
+
+
+# Horizontal stacked bars, one panel per region; every 3rd year is labelled.
+bar_graph_grouped <- ggplot(data_pct_grouped, aes(x = factor(Year), y = Percent, fill = Grouped_Item)) +
+  geom_bar(stat = "identity") +
+  coord_flip() + # Flip to horizontal bars
+  facet_wrap(~ Region, nrow = 1) +  # Side-by-side facets
+  scale_fill_manual(
+    values = c(
+       "Sweets and Sugar" = "#cc3366",
+       "Oils" = "#ff9900",
+       "Pulses" = "sienna",
+       "Nuts & seeds" =  "dodgerblue",
+       "Animal Sources" = "gray76",
+       "Fruit and vegetables" =  "springgreen4",
+       "Starchy Roots" = "salmon1",
+       "Cereals" = "#d9b38c"
+    )
+  ) +
+  scale_y_continuous(breaks = seq(0, 100, by = 10)) +
+  labs(
+    title = "Share of food supply (g/person/day)",
+    x = "",
+    y = "Percent",
+    fill = "Food Group"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold", size = 20),
+    axis.text.y = element_text(size = 16),
+       axis.text.x = element_text(size = 16),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 18),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+  ) +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 3)])
+
+print(bar_graph_grouped)
+#######################
+# Save the plots
+png(file.path(FIG_DIR, "bar_graph1.png"),
+    width = 18, height = 11, units = "in", res = 1400)
+print(bar_graph_grouped)
+dev.off()
+#######################
+unique(data_pct_grouped$Region)
+unique(data_pct_grouped$Grouped_Item)
+#######################
+# Pull the 1992 and 2022 shares per food group (Kenya, SSA, World) for reporting.
+percent_Cr <- subset(data_pct_grouped,
+                        Grouped_Item == "Cereals" &
+                        Region %in% c("Kenya", "SSA", "World") &
+                        Year %in% c(1992, 2022))
+print(percent_Cr)
+#######################
+percent_Rt <- subset(data_pct_grouped,
+                        Grouped_Item == "Starchy Roots" &
+                        Region %in% c("Kenya", "SSA", "World") &
+                        Year %in% c(1992, 2022))
+print(percent_Rt)
+#######################
+percent_animals <- subset(data_pct_grouped,
+                        Grouped_Item == "Animal Sources" &
+                        Region %in% c("Kenya", "SSA", "World") &
+                        Year %in% c(1992, 2022))
+print(percent_animals )
+#######################
+percent_fv<- subset(data_pct_grouped,
+                        Grouped_Item == "Fruit and vegetables" &
+                        Region %in% c("Kenya", "SSA", "World") &
+                        Year %in% c(1992, 2022))
+print(percent_fv)
+#######################
+percent_pn<- subset(data_pct_grouped,
+                        Grouped_Item == "Pulses" &
+                        Region %in% c("Kenya", "SSA", "World") &
+                        Year %in% c(1992, 2022))
+
+print(percent_pn)
+#######################
+percent_ns<- subset(data_pct_grouped,
+                        Grouped_Item == "Nuts & seeds" &
+                        Region %in% c("Kenya", "SSA", "World") &
+                        Year %in% c(1992, 2022))
+print(percent_ns)
+#######################
+percent_SS<- subset(data_pct_grouped,
+                        Grouped_Item == "Sweets and Sugar" &
+                        Region %in% c("Kenya", "SSA", "World") &
+                        Year %in% c(1992, 2022))
+print(percent_SS)
+#######################
+```
+
+
+
+# socioeconomic drivers data
+```{r}
+
+# ---- 4. SOCIOECONOMIC DRIVERS (World Bank-style indicators) ----
+# Wide file: one column per year, named like "1990 [YR1990]".
+Data <- read_excel(file.path(DATA_DIR, "drivers", "All countries.xlsx"))
+print(Data)
+#######################
+#Check names and data structure
+colnames(Data)
+print(head(Data))
+#######################
+# Inspect the data for non-numeric values in year columns
+# Check which year cells contain something other than digits/dots (e.g. ".." for missing).
+year_columns <- Data %>% select(starts_with("19") | starts_with("20"))
+non_numeric_values <- year_columns %>% filter_all(any_vars(!grepl("^[0-9.]+$", .)))
+#######################
+# Print non-numeric values if any
+print(non_numeric_values)
+#######################
+# Convert all year columns to numeric
+# Convert year columns to numeric by stripping non-numeric characters.
+Data <- Data %>%
+  mutate(across(starts_with("19") | starts_with("20"), ~ as.numeric(gsub("[^0-9.]", "", .))))
+#######################
+# Check for any remaining NAs after conversion
+na_values <- Data %>% filter_all(any_vars(is.na(.)))
+print(na_values)
+#######################
+#change to long format
+# Wide -> long. (Lower-case "data" is a generic name; consider renaming to avoid confusion.)
+data <- Data %>%
+  pivot_longer(cols = starts_with("19") | starts_with("20"), names_to = "Year", values_to = "Value")
+print(data)
+#######################
+#Remove [YR xxx] from the Year columns
+# "1990 [YR1990]" -> "1990".
+data$Year <-gsub("\\s*\\[YR([0-9]+)\\]", "",data$Year)   #\\s*- Matches any white space (including the space before the bracket)
+# \\[YR([0-9]    Matches the bracketed part [YR1990]
+
+print(data)
+#######################
+data <- data %>%
+  rename(Region = "Country Name",
+         Element = "Series Name")
+
+print(data)
+#######################
+# Remove unnecessary columns
+col_remove <- c("Country Code", "Series Code")
+data_drivers <- data %>% select(-all_of(col_remove))
+
+print(data_drivers)
+names(data_drivers)
+unique(data_drivers$Region)
+unique(data_drivers$Element)
+unique(data_drivers$Year)
+#######################
+#Convert Values to numeric
+data_drivers$Value <- as.numeric(data_drivers$Value)
+data_drivers$Year <- as.numeric(data_drivers$Year)
+#######################
+#rename row names
+data_drivers$Element[data_drivers$Element == "Employment in agriculture (% of total employment) (modeled ILO estimate)"] <- "Employment in agriculture"
+data_drivers$Element[data_drivers$Element == "Access to clean fuels and technologies for cooking, urban (% of urban population)"] <- "clean fuels_urban"
+data_drivers$Element[data_drivers$Element == "Access to clean fuels and technologies for cooking, rural (% of rural population)"] <- "clean fuels_rural"
+data_drivers$Element[data_drivers$Element == "Arable land (% of land area)"] <- "Arable land"
+data_drivers$Element[data_drivers$Element == "Cereal yield (kg per hectare)"] <- "Cereal yield"
+data_drivers$Element[data_drivers$Element == "Employment in services, female (% of female employment) (modeled ILO estimate)"] <- "female employment"
+data_drivers$Element[data_drivers$Element == "Fertilizer consumption (kilograms per hectare of arable land)"] <- "Fertilizer consumption"
+data_drivers$Element[data_drivers$Element == "GDP per capita, PPP (current international $)"] <- "GDP"
+data_drivers$Element[data_drivers$Element == "Food exports (% of merchandise exports)"] <- "Food exports"
+data_drivers$Element[data_drivers$Element == "Food imports (% of merchandise imports)"] <- "Food imports"
+data_drivers$Element[data_drivers$Element == "Population growth (annual %)"] <- "Population growth"
+data_drivers$Element[data_drivers$Element == "Urban population (% of total population)"] <- "Urban population"
+#######################
+print(data_drivers)
+names(data_drivers)
+unique(data_drivers$Region)
+unique(data_drivers$Element)
+unique(data_drivers$Year)
+#######################
+#select countries
+regions_to_keep3 <- c(
+  "Angola", "Benin", "Botswana", "Burkina Faso", "Cabo Verde", "Cameroon",
+  "Central African Republic", "Chad", "Congo, Rep.", "Cote d'Ivoire",
+  "Eswatini", "Ethiopia", "Gabon", "Gambia, The",
+  "Ghana", "Guinea", "Guinea-Bissau", "Kenya", "Lesotho", "Liberia", "Madagascar",
+  "Malawi", "Mali", "Mauritania", "Mauritius", "Mozambique", "Namibia", "Niger",
+  "Nigeria", "Rwanda", "Senegal", "Sierra Leone", "South Africa",
+  "Togo", "Uganda",  "Zambia", "Zimbabwe", "Tanzania", "World"
+)
+data_drivers2 <- data_drivers %>%
+  filter(Region %in% regions_to_keep3)
+
+unique(data_drivers2$Region)
+unique(my_data$Region)
+unique(data_drivers2$Element)
+#######################
+#select countries
+Elements_to_keep33 <- c(
+  "Employment in agriculture",  "female employment", "Urban population", "GDP", "Population growth", "Arable land", "Food imports"
+)
+data_drivers2 <- data_drivers2  %>%
+  filter(Element %in% Elements_to_keep33)
+
+unique(data_drivers2$Element)
+#######################
+#Filter the years 1992-2022
+unique(data_drivers2$Year)
+
+data_drivers2 <- data_drivers2 %>%
+
+  filter(Year >= 1992 & Year <= 2022)
+
+print(data_drivers2)
+
+##########################################################################################################################################################
+############################################################################################################################################################
+###########################################################################################################################################################
+
+
+
+#Load GNI data
+GNI <- read_excel(file.path(DATA_DIR, "drivers", "GNI.SSA.World.xlsx"))
+print(GNI)
+#######################
+#Check names and structure
+colnames(GNI)
+print(head(GNI))
+#######################
+# Inspect the data for non-numeric values in year columns
+year_coll <- GNI %>% select(starts_with("19") | starts_with("20"))
+non_numeric_val <- year_coll %>% filter_all(any_vars(!grepl("^[0-9.]+$", .)))
+#######################
+# Print non-numeric values if any
+print(non_numeric_val)
+#######################
+# Convert all year columns to numeric
+# Same conversion as for the drivers 
+GNI1 <- GNI %>%
+  mutate(across(starts_with("19") | starts_with("20"), ~ as.numeric(gsub("[^0-9.]", "", .))))
+#######################
+# Check for any remaining NAs after conversion
+na_values <- GNI1 %>% filter_all(any_vars(is.na(.)))
+print(na_values)
+#######################
+#change to long format
+GNI2 <- GNI1  %>%
+  pivot_longer(cols = starts_with("19") | starts_with("20"), names_to = "Year", values_to = "Value")
+print(GNI2)
+#######################
+#Remove [YR xxx] from the Year columns
+GNI2$Year <-gsub("\\s*\\[YR([0-9]+)\\]", "",GNI2$Year)   #\\s*-           Matches any white space (including the space before the bracket)
+# \\[YR([0-9]    Matches the bracketed part [YR1990]
+
+print(GNI2)
+#######################
+#rename columns
+GNI2 <- GNI2 %>%
+  rename(Region = "Country Name",
+         Element = "Series Name")
+#######################
+# Remove unnecessary columns
+col_rem <- c("Country Code", "Series Code")
+GNI2 <- GNI2 %>% select(-all_of(col_rem))
+
+print(GNI2)
+names(GNI2)
+unique(GNI2$Region)
+unique(GNI2$Element)
+unique(GNI2$Year)
+#######################
+#Convert Values to numeric
+GNI2$Value <- as.numeric(GNI2$Value)
+GNI2$Year <- as.numeric(GNI2$Year)
+#######################
+#rename row names
+GNI2$Element[GNI2$Element == "GNI per capita, Atlas method (current US$)"] <- "GNI"
+#######################
+#select countries
+regions_keep <- c(
+  "Angola", "Benin", "Botswana", "Burkina Faso", "Cabo Verde", "Cameroon",
+  "Central African Republic", "Chad", "Congo, Rep.", "Cote d'Ivoire",
+  "Eswatini", "Ethiopia", "Gabon", "Gambia, The",
+  "Ghana", "Guinea", "Guinea-Bissau", "Kenya", "Lesotho", "Liberia", "Madagascar",
+  "Malawi", "Mali", "Mauritania", "Mauritius", "Mozambique", "Namibia", "Niger",
+  "Nigeria", "Rwanda", "Senegal", "Sierra Leone", "South Africa",
+  "Togo", "Uganda",  "Zambia", "Zimbabwe", "Tanzania", "World"
+)
+GNI3 <- GNI2 %>%
+  filter(Region %in% regions_keep)
+
+unique(GNI3$Region)
+#######################
+
+#Filter the years 1990-2022
+unique(GNI3$Year)
+
+GNI3 <- GNI3 %>%
+  filter(Year >= 1990 & Year <= 2022)
+
+print(GNI3)
+#######################
+#rename GNI value
+GNI4 <- GNI3 %>%
+  select (Region, Year, GNI = Value)
+#######################
+
+#MERGE GNI with DRIVERS
+View (data_drivers2)
+# View(GNI4)
+
+# Add GNI to the other drivers (long format, Element = "GNI").
+data_drivers3 <- bind_rows(data_drivers2, GNI3)
+names(data_drivers3)
+unique(data_drivers3$Element)
+print(data_drivers3)
+View(data_drivers3)
+#######################
+# Create SSA average (excluding Kenya and World)
+# SSA average of each indicator (unweighted; World excluded, Kenya included).
+ssa_avg_dr<- data_drivers3 %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Element) %>%
+  summarise(value = mean(Value, na.rm = TRUE)) %>%
+  mutate(Region = "SSA")
+
+ print(ssa_avg_dr)
+
+#######################
+ssa_avg_dr2 <- ssa_avg_dr %>%
+  filter(Year >= 1992 & Year <= 2022)
+print(ssa_avg_dr2, n = 217)
+
+ssa_avg_dr5 <- ssa_avg_dr %>%
+  filter(Year %in% c(1992,2022))
+print(ssa_avg_dr5)
+#######################
+ ggplot(ssa_avg_dr, aes(x = Year, y = value, color = Element)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ Element, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Trends in Sub-Saharan Africa (1990–2022)",
+       y = "Value",
+       x = "Year")
+#######################
+# Extract Kenya and World data
+kenya_data_dr <- data_drivers3 %>% filter(Region == "Kenya")
+world_data_dr <- data_drivers3 %>% filter(Region == "World")
+
+print(kenya_data_dr)
+print(world_data_dr)
+#######################
+kenya_data_dr2 <- kenya_data_dr %>%
+  filter(Year >= 1992 & Year <= 2022)
+
+print(kenya_data_dr2,  n = 155)
+
+world_data_dr2 <- world_data_dr %>%
+  filter(Year >= 1992 & Year <= 2022)
+print(world_data_dr2, n = 223)
+#######################
+kenya_data_dr5 <- kenya_data_dr %>%
+  filter(Year %in% c(1992,2022))
+print(kenya_data_dr5)
+
+world_data_dr5 <- world_data_dr %>%
+  filter(Year %in% c(1992,2022))
+print(world_data_dr5)
+#######################
+ ggplot(kenya_data_dr2, aes(x = Year, y = Value, color = Element)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ Element, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Trends in Kenya (1990–2022)",
+       y = "Value",
+       x = "Year")
+
+ggplot(world_data_dr2, aes(x = Year, y = Value, color = Element)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ Element, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Trends Globally  (1990–2022)",
+       y = "Value",
+       x = "Year")
+#######################
+#Merge all graphs onto one
+# One panel per indicator: SSA average, Kenya and World on the same axes.
+  # SSA trends
+ linewidth(data = ssa_avg_dr,
+            aes(x = Year, y = value, color = "SSA average"),
+            size = 1.2) +
+
+  # Kenya trends
+ linewidth(data = kenya_data_dr2,
+            aes(x = Year, y = Value, color = "Kenya"),
+            size = 1.2,
+            linetype = "dashed") +
+#World trends
+  linewidth(data = world_data_dr2,
+            aes(x = Year, y = Value, color = "World"),
+            size = 1.2,
+            linetype = "dashed") +
+
+
+  facet_wrap(~ Element, scales = "free_y") +
+  theme_minimal() +
+  scale_color_manual(values = c("SSA average" = "blue",
+                                "World" = "green",
+                                "Kenya" = "red")) +
+  labs(title = "Trends in Drivers (1990–2022)",
+       y = "Value",
+       x = "Year",
+       color = "Region") +
+  theme(legend.position = "bottom")
+
+#######################
+# Save the plots
+png(file.path(FIG_DIR, "Drivers.png"),
+    width = 16, height = 8, units = "in", res = 1200)
+
+print(
+  Drivers_graph +
+    theme_minimal(base_size = 18) +
+    theme(
+      plot.title = element_text(size = 24, face = "bold"),
+      axis.title = element_text(size = 20),
+      axis.text = element_text(size = 16),
+      strip.text = element_text(size = 18, face = "bold"),
+      legend.title = element_text(size = 18),
+      legend.text = element_text(size = 16),
+       legend.position = "bottom",
+      legend.box = "horizontal"
+    )
+)
+
+dev.off()
+#######################
+# Merged dataset
+ssa_avg_dr_fixed <- ssa_avg_dr %>%
+  rename(Value = value) %>%
+  select(Region, Element, Year, Value)
+
+# Merged drivers table for SSA average, Kenya and World.
+drivers_data <- bind_rows(world_data_dr, kenya_data_dr, ssa_avg_dr_fixed)
+
+unique(ssa_avg_dr_fixed$Element)
+
+```
+
+
+# Load Obesity data
+```{r}
+
+# ---- 5. OBESITY PREVALENCE (NCD-RisC, age-standardised) ----
+# Value used: prevalence of BMI >= 30 kg/m2 (a proportion, 0-1), by country, year and sex.
+obesity_coutries <- read.csv(file.path(DATA_DIR, "obesity", "NCD_RisC_Lancet_2024_BMI_age_standardised_country.csv"))
+
+unique(obesity_coutries$Country.Region.World)
+View(obesity_coutries)
+#######################
+# Remove unnecessary columns
+# Drop all columns except Country, Sex, Year and obesity prevalence 
+obesity_coutries <- obesity_coutries[, !names(obesity_coutries) %in% c(
+  "Prevalence.of.BMI.18.5.kg.m...underweight.",
+  "Prevalence.of.BMI.18.5.kg.m...underweight..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.18.5.kg.m...underweight..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI..30.kg.m...obesity..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI..30.kg.m...obesity..upper.95..uncertainty.interval",
+  "Combined.prevalence.of.BMI.18.5.kg.m..and.BMI..30.kg.m...double.burden.of.underweight.and.obesity.",
+  "Combined.prevalence.of.BMI.18.5.kg.m..and.BMI..30.kg.m...double.burden.of.underweight.and.obesity..lower.95..uncertainty.interval",
+  "Combined.prevalence.of.BMI.18.5.kg.m..and.BMI..30.kg.m...double.burden.of.underweight.and.obesity..upper.95..uncertainty.interval",
+  "Proportion.of.double.burden.from.obesity",
+  "Proportion.of.double.burden.from.obesity.lower.95..uncertainty.interval",
+  "Proportion.of.double.burden.from.obesity.upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.18.5.kg.m..to..20.kg.m.",
+  "Prevalence.of.BMI.18.5.kg.m..to..20.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.18.5.kg.m..to..20.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.20.kg.m..to..25.kg.m.",
+  "Prevalence.of.BMI.20.kg.m..to..25.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.20.kg.m..to..25.kg.m..upper.95..uncertainty.interval" ,
+  "Prevalence.of.BMI.25.kg.m..to..30.kg.m.",
+  "Prevalence.of.BMI.25.kg.m..to..30.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.25.kg.m..to..30.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.30.kg.m..to..35.kg.m.",
+  "Prevalence.of.BMI...40.kg.m...morbid.obesity..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI...40.kg.m...morbid.obesity..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI...40.kg.m...morbid.obesity.",
+  "Prevalence.of.BMI.35.kg.m..to..40.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.35.kg.m..to..40.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.35.kg.m..to..40.kg.m.",
+  "Prevalence.of.BMI.30.kg.m..to..35.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.30.kg.m..to..35.kg.m..lower.95..uncertainty.interval"
+)]
+
+
+print(obesity_coutries)
+names(obesity_coutries)
+#######################
+#remove ISO
+obesity_coutries <- obesity_coutries[, !names(obesity_coutries) %in% c(
+  "ISO")]
+#######################
+#rename columns
+# Value_Obesity = prevalence of BMI >= 30.
+obesity_coutries <- obesity_coutries %>%
+  rename(Region = "Country.Region.World",
+         Value_Obesity = "Prevalence.of.BMI..30.kg.m...obesity.")
+
+print(obesity_coutries)
+names(obesity_coutries)
+unique(obesity_coutries$Region)
+unique(obesity_coutries$Sex)
+unique(obesity_coutries$Year)
+#######################
+#select countries
+# NCD-RisC spelling differs slightly ("Guinea Bissau", "Gambia", "Congo"); fixed just below.
+regions_to_keep4 <- c(
+  "Angola", "Benin", "Botswana", "Burkina Faso", "Cabo Verde", "Cameroon",
+  "Central African Republic", "Chad", "Congo", "Cote d'Ivoire",
+  "Eswatini", "Ethiopia", "Gabon", "Gambia",
+  "Ghana", "Guinea", "Guinea Bissau", "Kenya", "Lesotho", "Liberia", "Madagascar",
+  "Malawi", "Mali", "Mauritania", "Mauritius", "Mozambique", "Namibia", "Niger",
+  "Nigeria", "Rwanda", "Senegal", "Sierra Leone", "South Africa",
+  "Togo", "Uganda",  "Zambia", "Zimbabwe", "Tanzania", "World"
+)
+obesity_coutries2 <- obesity_coutries %>%
+  filter(Region %in% regions_to_keep4)
+
+obesity_coutries2$Region[obesity_coutries2$Region == "Congo"] <- "Congo, Rep."
+obesity_coutries2$Region[obesity_coutries2$Region ==  "Gambia"] <- "Gambia, The"
+obesity_coutries2$Region[obesity_coutries2$Region ==  "Guinea Bissau"] <- "Guinea-Bissau"
+
+unique(obesity_coutries2$Region)
+unique(my_data$Region)
+ print(obesity_coutries2)
+#######################
+# Create SSA average (excluding World)
+ssa_avg_ob <- obesity_coutries2 %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Sex) %>%
+  summarise(value = mean(Value_Obesity, na.rm = TRUE)) %>%
+  mutate(Region = "SSA")
+
+ print(ssa_avg_ob)
+
+ ssa_avg_ob  <- ssa_avg_ob  %>%
+  group_by(Year, Region) %>%
+  summarise(BMI = mean(value, na.rm = TRUE), .groups = "drop")
+
+print(ssa_avg_ob, n = 33)
+#######################
+# Extract Kenya and World data
+kenya_data_ob <- obesity_coutries2 %>% filter(Region == "Kenya")
+
+kenya_data_ob  <- kenya_data_ob  %>%
+  group_by(Year, Region) %>%
+  summarise(BMI = mean(Value_Obesity, na.rm = TRUE), .groups = "drop")
+
+print(kenya_data_ob, n = 33)
+#######################
+#World data
+obesity_world <- read.csv(file.path(DATA_DIR, "obesity", "NCD_RisC_Lancet_2024_BMI_age_standardised_world (2).csv"))
+
+print(obesity_world)
+names(obesity_world)
+#######################
+# Remove unnecessary columns
+obesity_world <- obesity_world[, !names(obesity_world) %in% c(
+  "Prevalence.of.BMI.18.5.kg.m...underweight.",
+  "Prevalence.of.BMI.18.5.kg.m...underweight..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.18.5.kg.m...underweight..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI..30.kg.m...obesity..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI..30.kg.m...obesity..upper.95..uncertainty.interval",
+  "Combined.prevalence.of.BMI.18.5.kg.m..and.BMI..30.kg.m...double.burden.of.underweight.and.obesity.",
+  "Combined.prevalence.of.BMI.18.5.kg.m..and.BMI..30.kg.m...double.burden.of.underweight.and.obesity..lower.95..uncertainty.interval",
+  "Combined.prevalence.of.BMI.18.5.kg.m..and.BMI..30.kg.m...double.burden.of.underweight.and.obesity..upper.95..uncertainty.interval",
+  "Proportion.of.double.burden.from.obesity",
+  "Proportion.of.double.burden.from.obesity.lower.95..uncertainty.interval",
+  "Proportion.of.double.burden.from.obesity.upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.18.5.kg.m..to..20.kg.m.",
+  "Prevalence.of.BMI.18.5.kg.m..to..20.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.18.5.kg.m..to..20.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.20.kg.m..to..25.kg.m.",
+  "Prevalence.of.BMI.20.kg.m..to..25.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.20.kg.m..to..25.kg.m..upper.95..uncertainty.interval" ,
+  "Prevalence.of.BMI.25.kg.m..to..30.kg.m.",
+  "Prevalence.of.BMI.25.kg.m..to..30.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.25.kg.m..to..30.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.30.kg.m..to..35.kg.m.",
+  "Prevalence.of.BMI...40.kg.m...morbid.obesity..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI...40.kg.m...morbid.obesity..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI...40.kg.m...morbid.obesity.",
+  "Prevalence.of.BMI.35.kg.m..to..40.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.35.kg.m..to..40.kg.m..lower.95..uncertainty.interval",
+  "Prevalence.of.BMI.35.kg.m..to..40.kg.m.",
+  "Prevalence.of.BMI.30.kg.m..to..35.kg.m..upper.95..uncertainty.interval",
+  "Prevalence.of.BMI.30.kg.m..to..35.kg.m..lower.95..uncertainty.interval",
+  "ISO"
+)]
+
+
+print(obesity_world)
+names(obesity_world)
+#######################
+#rename columns
+obesity_world <- obesity_world %>%
+  rename(Region = "Country.Region.World",
+         Value_Obesity = "Prevalence.of.BMI..30.kg.m...obesity.")
+#######################
+#combine gender
+obesity_world  <- obesity_world  %>%
+  group_by(Year, Region) %>%
+  summarise(BMI = mean(Value_Obesity, na.rm = TRUE), .groups = "drop")
+
+print(obesity_world, n =33)
+
+names(obesity_world)
+unique(obesity_world$Region)
+unique(obesity_world$Sex)
+#######################
+#merge
+print(obesity_world)
+print(ssa_avg_ob)
+print(kenya_data_ob)
+
+colnames(obesity_world)
+colnames(kenya_data_ob)
+colnames(ssa_avg_ob)
+
+# World, Kenya and SSA average in one table (columns Year, Region, BMI).
+# NOTE: "BMI" here is obesity prevalence (BMI >= 30), not mean BMI.
+obesity_data <- rbind(obesity_world, kenya_data_ob,ssa_avg_ob)
+print(obesity_data)
+#######################
+#Multiply obesity prevalence by 100
+# Convert proportion -> percent.
+avg_ob <- obesity_data %>%
+  mutate(BMI = BMI * 100)
+
+print(avg_ob)
+
+pr <- subset(avg_ob,
+          Year %in% c(1992, 2022))
+
+print(pr)
+
+avg_ob <- avg_ob %>%
+  filter(Year >= 1992 & Year <= 2022)
+
+print(avg_ob)
+#######################
+#PLOT
+# Obesity prevalence over time for World, SSA and Kenya.
+obesity_p  <- ggplot(avg_ob, aes(x = Year, y = BMI, color = Region)) +
+  geom_line(size = 1) +
+  geom_point() +
+  labs(
+    title = "Obesity 1992-2022",
+    x = "Year",
+    y = "prevalence",
+    color = "Region"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 22, face = "bold"),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 18),
+    axis.text = element_text(size = 18)
+  )
+
+print(obesity_p )
+#######################
+#save
+png(file.path(FIG_DIR, "obesity trend.png"),
+    width = 20, height = 12, units = "in", res = 1200)
+grid.draw(obesity_p)
+dev.off()
+
+```
+
+
+
+# fuzzy set analysis- DAta cleaning
+```{r}
+# Choose SSA countries
+#food supply
+print(my_data)
+unique(my_data$ Grouped_Item)
+unique(my_data$Region)
+unique(my_data$Year)
+print(my_data)
+#######################
+# ---- 6. BUILD THE COUNTRY-LEVEL DATASET FOR fsQCA ----
+# Country-level food supply, excluding World
+sup_sa <- my_data %>%
+  filter(!Region %in% c("World", "Sao Tome and Principe")) %>%
+  group_by(Year, Grouped_Item)
+
+ print(sup_sa)
+ 
+#########################
+print(obesity_coutries2)
+unique(obesity_coutries2$Region)
+#######################
+ #Multiply obesity prevalence by 100
+# Obesity prevalence in percent, then averaged over sexes per country and year.
+ssa_bmi <-obesity_coutries2 %>%
+  mutate(BMI = Value_Obesity * 100)
+
+print(ssa_bmi)
+#######################
+#combine gender
+ ssa_bmi  <- ssa_bmi  %>%
+  group_by(Year, Region) %>%
+  summarise(BMI = mean(BMI, na.rm = TRUE), .groups = "drop")
+
+print(ssa_bmi)
+
+##########################
+#drivers
+  print(data_drivers3)
+unique(data_drivers3$Region)
+
+# Country-level drivers (World excluded).
+driverss <- data_drivers3 %>%
+  filter(!Region %in% c("World")) %>%
+  group_by(Year, Element)
+
+
+ print(driverss)
+  print(data_drivers3)
+
+```
+
+
+#### full dataset for fuzzy
+```{r}
+
+unique(driverss$Region)
+print(driverss )
+
+print(sup_sa)
+unique(sup_sa$Region)
+
+print(ssa_bmi)
+unique(ssa_bmi$Region)
+
+#######################
+#Widen food supply
+unique(sup_sa$Grouped_Item)
+print(sup_sa)
+
+# Long -> wide: one column per food group.
+fsupply_wide <- (sup_sa) %>%
+  pivot_wider(names_from = Grouped_Item,
+              values_from =  value)
+
+print(fsupply_wide)
+#######################
+# Widen data_drivers
+print(driverss)
+
+driverss_wide <- driverss %>%
+  pivot_wider(names_from = Element,
+              values_from = Value)
+
+print(driverss_wide)
+#######################
+#filter years
+# Restrict all four tables to 1992-2022.
+ssa_supply2 <- fsupply_wide %>% filter(Year >= 1992 & Year <= 2022)
+unique(ssa_supply2$Year)
+
+ssa_bmi <- ssa_bmi %>% filter(Year >= 1992 & Year <= 2022)
+unique(ssa_bmi$Year)
+
+ssa_drivers <- driverss_wide %>% filter(Year >= 1992 & Year <= 2022)
+unique(ssa_drivers$Year)
+
+ssa_energy <- energy_sa_wide %>% filter(Year >= 1992 & Year <= 2022)
+unique(ssa_energy$Year)
+#######################
+# Merge
+# Merge outcome (obesity) + food groups + drivers by Region and Year.
+final_data2 <- ssa_bmi %>%
+  left_join(ssa_supply2 , by = c("Region", "Year")) %>%
+  left_join(ssa_drivers, by = c("Region", "Year"))
+
+print(final_data2)
+names(final_data2)
+#######################
+
+final_dt <- ssa_bmi %>%
+  left_join(ssa_supply2 , by = c("Region", "Year")) %>%
+  left_join(ssa_energy , by = c("Region", "Year")) %>%
+  left_join(ssa_drivers, by = c("Region", "Year"))
+
+print(final_dt)
+names(final_dt)
+
+```
+
+
+# per year
+```{r}
+print(final_data2)
+
+# ---- 7. ONE DATASET PER QCA YEAR ----
+# Cross-sectional data: 38 SSA countries in 2022 and in 1992.
+fuzzy_AFR_2022 <- final_data2 %>%
+  filter(Year == 2022)
+
+print(fuzzy_AFR_2022)
+
+
+fuzzy_AFR_1992<- final_data2 %>%
+  filter(Year == 1992)
+
+print(fuzzy_AFR_1992)
+
+##############################
+
+#Check NAs
+colSums(is.na(fuzzy_AFR_1992))
+colSums(is.na(fuzzy_AFR_2022))
+
+#####################################
+#impute missing values 
+fuzzy_AFR_1992$`Fruit and vegetables`[is.na(fuzzy_AFR_1992$`Fruit and vegetables`)] <- mean(fuzzy_AFR_1992$`Fruit and vegetables`, na.rm = TRUE)
+fuzzy_AFR_1992$`Sweets and Sugar`[is.na(fuzzy_AFR_1992$`Sweets and Sugar`)] <- mean(fuzzy_AFR_1992$`Sweets and Sugar`, na.rm = TRUE)
+fuzzy_AFR_1992$Oils[is.na(fuzzy_AFR_1992$Oils)] <- mean(fuzzy_AFR_1992$Oils, na.rm = TRUE)
+fuzzy_AFR_1992$`Animal Sources`[is.na(fuzzy_AFR_1992$`Animal Sources`)] <- mean(fuzzy_AFR_1992$`Animal Sources`, na.rm = TRUE)
+fuzzy_AFR_1992$Pulses[is.na(fuzzy_AFR_1992$Pulses)] <- mean(fuzzy_AFR_1992$Pulses, na.rm = TRUE)
+
+fuzzy_AFR_1992$`Starchy Roots`[is.na(fuzzy_AFR_1992$`Starchy Roots`)] <- mean(fuzzy_AFR_1992$`Starchy Roots` , na.rm = TRUE)
+fuzzy_AFR_1992$`Nuts & seeds`[is.na(fuzzy_AFR_1992$`Nuts & seeds`)] <- mean(fuzzy_AFR_1992$`Nuts & seeds`, na.rm = TRUE)
+fuzzy_AFR_1992$Cereals[is.na(fuzzy_AFR_1992$Cereals)] <- mean(fuzzy_AFR_1992$Cereals, na.rm = TRUE)
+fuzzy_AFR_1992$`Food imports`[is.na(fuzzy_AFR_1992$`Food imports`)] <- mean(fuzzy_AFR_1992$`Food imports`, na.rm = TRUE)
+fuzzy_AFR_1992$`Arable land`[is.na(fuzzy_AFR_1992$`Arable land`)] <- mean(fuzzy_AFR_1992$`Arable land`, na.rm = TRUE)
+
+fuzzy_AFR_1992$`GNI`[is.na(fuzzy_AFR_1992$`GNI`)] <- mean(fuzzy_AFR_1992$`GNI`, na.rm = TRUE)
+fuzzy_AFR_2022$`Food imports`[is.na(fuzzy_AFR_2022$`Food imports`)] <- mean(fuzzy_AFR_2022$`Food imports`, na.rm = TRUE)
+
+```
+
+
+# 2022 correlation
+```{r}
+#Correlation
+print(fuzzy_AFR_2022)
+print(fuzzy_AFR_2022$Region)
+#######################
+# Prepare the data: drop Year and Region, keep only numeric variables
+# ---- 8. SPEARMAN CORRELATIONS WITH OBESITY (2022) ----
+numeric_data <- fuzzy_AFR_2022 %>%
+  select(-Year, -Region) %>%
+  select(where(is.numeric))
+#######################
+# Compute Spearman correlation between BMI and all other numeric variables
+# Spearman rank correlations (robust to non-normality) among all numeric variables; p-values in $p.
+bmi_cor <- rcorr(as.matrix(numeric_data), type = "spearman")
+
+print(bmi_cor$r)
+print(bmi_cor$p)
+
+#######################
+# Extract BMI correlations
+# Keep correlations with obesity ("BMI" column) and sort them for the bar chart.
+bmi_only <- bmi_cor$r["BMI", ]
+bmi_only <- bmi_only[!is.na(bmi_only)]  # remove NAs if any
+bmi_only <- sort(bmi_only, decreasing = TRUE)
+
+#######################
+ggplot(data.frame(Variable = names(bmi_only), Correlation = bmi_only),
+       aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(title = "Spearman Correlation with BMI - 2022",
+       x = "Variable", y = "Correlation Coefficient") +
+  theme_minimal(base_size = 16) +  # 🔹 Increase all text size
+  theme(
+    plot.title = element_text(size = 26, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 18),
+    axis.text = element_text(size = 14),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14)
+  )
+
+
+###############################################################################
+```
+
+
+# 2022 fsQCA
+```{r}
+#2022 data
+colSums(is.na(fuzzy_AFR_2022))  #no Nas
+#######################
+#min, median and max
+# ---- 9. fsQCA 2022 ----
+# Step 1: inspect distributions (min / median / max) to choose calibration anchors.
+summary(fuzzy_AFR_2022$Cereals)
+summary(fuzzy_AFR_2022$`Fruit and vegetables`)
+summary(fuzzy_AFR_2022$Pulses)
+summary(fuzzy_AFR_2022$`Animal Sources`)
+summary(fuzzy_AFR_2022$`Starchy Roots`)
+summary(fuzzy_AFR_2022$`Nuts & seeds`)
+summary(fuzzy_AFR_2022$`Sweets and Sugar`)
+summary(fuzzy_AFR_2022$`Urban population`)
+summary(fuzzy_AFR_2022$`female employment`)
+summary(fuzzy_AFR_2022$`Employment in agriculture`)
+summary(fuzzy_AFR_2022$BMI)
+#######################
+#Percentiles 10, 50, 90
+# 10th / 50th / 90th percentiles, used as anchors for the "...90_22" conditions.
+quantile(fuzzy_AFR_2022$`Employment in agriculture`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_2022$`female employment`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_2022$`Urban population`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_2022$`Arable land`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_2022$`Food imports`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+quantile(fuzzy_AFR_2022$BMI,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+#######################
+#Calibrate
+# Step 2: direct fuzzy calibration with QCA::calibrate(). thresholds = c(full exclusion, crossover, full inclusion).
+# Outcome BMI_22 = membership in "high obesity prevalence" (anchors = 10th/50th/90th percentile).
+fuzzy_AFR_2022$BMI_22 <- calibrate(fuzzy_AFR_2022$BMI, type = "fuzzy", thresholds = c(6.69, 11.91, 21.60))
+
+#high-income   >$13854 or higher,
+#upper-middle   $4466-$13845,
+#lower-middle   $1136-$4465,
+#low-income    <$1136 and less
+# GNI anchors follow World Bank income thresholds (exclusion 4,466 / crossover 9,156 / inclusion 13,854 US$).
+fuzzy_AFR_2022$GNI_22 <- calibrate(fuzzy_AFR_2022$GNI, type = "fuzzy", thresholds = c(4466, 9156, 13854))
+
+# Food-group conditions: anchors based on EAT-Lancet ranges (crossover = EAT-Lancet target).
+fuzzy_AFR_2022$SS_22 <- calibrate(fuzzy_AFR_2022$`Sweets and Sugar`, type = "fuzzy", thresholds = c(0.08, 31, 62))
+fuzzy_AFR_2022$Cr_22 <- calibrate(fuzzy_AFR_2022$Cereals, type = "fuzzy", thresholds = c(122.8, 232, 464))
+fuzzy_AFR_2022$FV_22 <- calibrate(fuzzy_AFR_2022$`Fruit and vegetables`, type = "fuzzy", thresholds = c(100, 300, 600))
+fuzzy_AFR_2022$Pl_22 <- calibrate(fuzzy_AFR_2022$Pulses, type = "fuzzy", thresholds = c(0.575, 75, 150))
+fuzzy_AFR_2022$NS_22 <- calibrate(fuzzy_AFR_2022$`Nuts & seeds`, type = "fuzzy", thresholds = c(0.301, 50, 100))
+fuzzy_AFR_2022$An_22 <- calibrate(fuzzy_AFR_2022$`Animal Sources`, type = "fuzzy", thresholds = c(82.05, 157, 334))
+fuzzy_AFR_2022$Rt_22 <- calibrate(fuzzy_AFR_2022$`Starchy Roots`, type = "fuzzy", thresholds = c(41.34, 50, 100))
+
+#Median, mean,
+# Alternative calibration (min / median / max) for the socioeconomic conditions. Not used in the QCA below.
+fuzzy_AFR_2022$agric_22 <- calibrate(fuzzy_AFR_2022$`Employment in agriculture`, type = "fuzzy", thresholds = c(5.47, 43.05, 70.70))
+fuzzy_AFR_2022$Urban_22 <- calibrate(fuzzy_AFR_2022$`Urban population`, type = "fuzzy", thresholds = c(16.89, 45.24, 90.73))
+fuzzy_AFR_2022$female_22 <- calibrate(fuzzy_AFR_2022$`female employment`, type = "fuzzy", thresholds = c(17.07, 46.66, 85.97))
+fuzzy_AFR_2022$imports_22 <- calibrate(fuzzy_AFR_2022$`Food imports`, type = "fuzzy", thresholds = c(6.38, 17.16, 30))
+fuzzy_AFR_2022$land_22 <- calibrate(fuzzy_AFR_2022$`Arable land`, type = "fuzzy", thresholds = c(0.44, 16.65, 51.41))
+fuzzy_AFR_2022$GNI1_22 <- calibrate(fuzzy_AFR_2022$GNI, type = "fuzzy", thresholds = c(4466, 9156, 13854))
+
+#Percentiles
+# Calibration used in the QCA: 10th / 50th / 90th percentile of each condition.
+fuzzy_AFR_2022$Agric90_22 <- calibrate(fuzzy_AFR_2022$`Employment in agriculture`, type = "fuzzy", thresholds = c(18.77, 41.48, 69.61))
+fuzzy_AFR_2022$Fe90_22 <- calibrate(fuzzy_AFR_2022$`female employment`, type = "fuzzy", thresholds = c(22.83, 44.94, 73.25))
+fuzzy_AFR_2022$Urb90_22 <- calibrate(fuzzy_AFR_2022$`Urban population`, type = "fuzzy", thresholds = c(23.64, 44.48, 68.16))
+fuzzy_AFR_2022$Land90_22 <- calibrate(fuzzy_AFR_2022$`Arable land`, type = "fuzzy", thresholds = c(1.51, 12.76, 41.08))
+fuzzy_AFR_2022$Imports90_22 <- calibrate(fuzzy_AFR_2022$`Food imports`, type = "fuzzy", thresholds = c(9.74, 17.42, 24.38))
+#######################
+
+# Summary to check distribution of calibrated BMI: its distribution should not be extremely skewed.
+summary(fuzzy_AFR_2022$BMI_22)
+# histogram to check distribution of calibrated BMI
+hist(fuzzy_AFR_2022$BMI_22,
+     main = "Fuzzy Set Membership: BMI",
+     xlab = "Membership Score",
+     col = "lightblue",
+     border = "black")
+
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+
+
+#create data frame for conditions and outcome only
+# Step 3: data frame with only the calibrated outcome and conditions (QCA needs a plain data.frame).
+qca_data22 <- fuzzy_AFR_2022 %>%
+  dplyr::select(
+    BMI_22,
+    Agric90_22,
+    Land90_22,
+    Urb90_22,
+    Fe90_22,
+    GNI_22,
+    SS_22,
+    Cr_22,
+    FV_22,
+    Pl_22,
+    NS_22,
+    An_22,
+    Rt_22
+  ) %>%
+  as.data.frame()
+#######################
+#Necessity Analysis for presence of outcome
+# Step 4: necessity analysis. A condition is necessary if consistency (inclN) is high
+# (conventionally >= 0.90) and its relevance (RoN / covN) is not trivial.
+necessity2_2022<- pof(data = qca_data22,
+                     outcome = "BMI_22",
+                     conditions = c(
+                       "Agric90_22",
+                       "Urb90_22",
+                       "Fe90_22",
+                       "Land90_22",
+                       "GNI_22",
+                       "SS_22",
+                       "Cr_22",
+                       "FV_22",
+                       "Pl_22",
+                       "NS_22",
+                       "An_22",
+                       "Rt_22"
+                       ),
+                       relation = "necessity")
+
+print(necessity2_2022)
+
+#######################
+# Test necessity for absence of high obesity (outcome = 0)
+# Negated outcome (membership in LOW obesity = 1 - membership in high obesity).
+qca_data22$low_BMI_22 <- 1 - qca_data22$BMI_22
+
+necessity_low <- pof(
+  data = qca_data22,
+  outcome = "low_BMI_22",
+  conditions = c(
+                       "Agric90_22",
+                       "Urb90_22",
+                       "Fe90_22",
+                       "Land90_22",
+                       "GNI_22",
+                       "SS_22",
+                       "Cr_22",
+                       "FV_22",
+                       "Pl_22",
+                       "NS_22",
+                       "An_22",
+                       "Rt_22"),
+  relation = "necessity")
+
+print(necessity_low)
+
+#######################
+# Create a truth table 
+# Step 5: truth table (sufficiency). Eight conditions are used 
+# incl.cut = 0.8: minimum consistency for a row to count as sufficient; n.cut = 2: minimum cases per row;
+# pri.cut = 0.7: minimum PRI to avoid rows that are also sufficient for the negated outcome.
+#
+tt_2022<- truthTable(data = qca_data22 ,
+                 outcome = "BMI_22",
+                 conditions = c(
+                       "Agric90_22",
+                       "Urb90_22",
+                       "Fe90_22",
+                       "GNI_22",
+                       "SS_22",
+                       "FV_22",
+                       "Pl_22",
+                       "An_22"
+                       ),
+                 incl.cut = 0.8,
+                 pri.cut = 0.7,
+                 n.cut = 2,
+                complete =TRUE,
+                show.cases = TRUE)
+
+print(tt_2022)
+#######################
+#Complex Solution
+# Step 6: Boolean minimisation. Complex solution = no counterfactuals (remainders excluded).
+sol_2022 <- minimize(
+  tt_2022,
+  include = "?",
+  details = TRUE,
+  solution.type = "complex",
+  show.cases = TRUE)
+
+print(sol_2022)
+
+#######################
+# parsimonious solution
+# Parsimonious solution = all remainders may be used as simplifying assumptions.
+parsi_2022 <- minimize(
+  tt_2022,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  solution.type = "parsimonious")
+
+print(parsi_2022)
+#######################
+#Intermediate solution
+# Intermediate solution = only "easy" counterfactuals consistent with directional expectations.
+# 1 = presence of the condition is expected to contribute to high obesity; "-" = no expectation.
+dir.exp1 <- c(                  # directional expectations
+"-",  # Agric90_22             # A value of 1 suggests the theoretical expectation that the presence of the condition contributes to the outcome
+ 1,   # Urb90_22                # "-" suggests the theoretical expectation was not specified
+ 1,   # Fe90_22
+ 1,   # GNI_22
+ 1,   # SS_22
+"-",  # FV_22
+"-",  # Pl_22
+"-"   # An_22
+)
+
+inter_2022 <- minimize(
+  tt_2022,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = dir.exp1,
+  solution.type = "intermediate"
+)
+
+print(inter_2022)
+#######################
+#To show the raw values and countries in the pathway
+# Show raw data for the countries that appear in the solution paths.
+cases1 <- c(3,9,14,24,27,33,5,15,31,1,6)
+cases11 <-  fuzzy_AFR_2022[cases1, ]
+print(cases11)
+
+cases2 <- c(11,18,5,15,31)
+cases12 <-  fuzzy_AFR_2022[cases2, ]
+print(cases12)
+View(cases12)
+
+#######################
+#Sufficiency analysis for low obesity
+# Step 7: same procedure for the negated outcome (LOW obesity); QCA analyses are asymmetric.
+ttlo_2022 <- truthTable(
+  data = qca_data22,
+  outcome = "low_BMI_22",
+  conditions = c(
+    "Agric90_22",
+    "Urb90_22",
+    "Fe90_22",
+    "GNI_22",
+    "SS_22",
+    "FV_22",
+    "Pl_22",
+    "An_22"
+  ),
+  incl.cut = 0.8,
+  pri.cut = 0.7,
+  n.cut = 2,
+  complete = TRUE,
+  show.cases = TRUE
+)
+
+print(ttlo_2022)
+#######################
+#Complex Solution
+sol_lo <- minimize(
+  ttlo_2022,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  solution.type = "complex"
+)
+sol_lo
+#######################
+# parsimonious solution
+lparsi_2022 <- minimize(ttlo_2022,
+                               include = "?",
+                               details = TRUE,
+                               show.cases = TRUE,
+                               solution.type = "parsimonious")
+print(lparsi_2022)
+#######################
+#Intermediate solution
+# For LOW obesity the expectation is reversed: the ABSENCE (0) of these conditions is expected to contribute.
+dir.explo22 <- c(
+"-",   # Agric90_22
+ 0,   # Urb90_22
+ 0,   # Fe90_22
+ 0,   # GNI_22
+ 0,   # SS_22
+"-",   # FV_22
+"-",   # Pl_22
+"-"   # An_22
+)
+
+
+linter_2022 <- minimize(
+  ttlo_2022,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = dir.explo22,
+  solution.type = "intermediate"
+)
+
+print(linter_2022)
+#######################
+cases111 <- c(7,8,12)
+cases1111 <-  fuzzy_AFR_2022[cases111, ]
+print(cases1111)
+
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+
+#sensitivity analysis
+#Truthtable
+# Step 8: sensitivity analysis with stricter cut-offs (incl.cut 0.85, pri.cut 0.8).
+ttS_2022 <- truthTable(
+  qca_data22,
+  outcome = "BMI_22",
+  conditions = c(
+                  "Agric90_22",
+                       "Urb90_22",
+                       "Fe90_22",
+                       "GNI_22",
+                       "SS_22",
+                       "FV_22",
+                       "Pl_22",
+                       "An_22"),
+  incl.cut = 0.85,                 #check with 0.9 and 0.95
+  n.cut = 2,                       #check with 1
+  pri.cut = 0.8,                   #check with 0.6 and 0.9
+  show.cases = TRUE,
+  complete =TRUE,
+)
+#######################
+#Intermediate solution
+dir.expS <- c(                       #Findings from the correlation analysis were used to apply the direction
+"-",   # Agric90_22
+ 1,   # Urb90_22
+ 1,   # Fe90_22
+ 1,   # GNI_22
+ 1,  # SS_22
+"-", # FV_22
+"-",   # Pl_22
+"-"   # An_22
+)
+
+
+interS_2022 <- minimize(
+  ttS_2022,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = dir.expS,
+  solution.type = "intermediate"
+)
+
+print(interS_2022)
+
+
+```
+
+
+# correlation analysis for1992
+```{r}
+
+
+# Prepare the data: drop Year and Region, keep only numeric variables
+# ---- 10. SPEARMAN CORRELATIONS WITH OBESITY (1992) ----
+numeric_data92 <- fuzzy_AFR_1992 %>%
+  select(-Year, -Region) %>%
+  select(where(is.numeric))
+#######################
+# Compute Spearman correlation between BMI and all other numeric variables
+bmi_cor92 <- rcorr(as.matrix(numeric_data92), type = "spearman")
+
+print(bmi_cor92$r)
+print(bmi_cor92$p)
+#######################
+
+# Extract BMI correlations
+bmi_92 <- bmi_cor92$r["BMI", ]
+bmi_92 <- bmi_92[!is.na(bmi_92)]  # remove NAs if any
+bmi_92 <- sort(bmi_92, decreasing = TRUE)
+#######################
+#Plot correlation graph
+ggplot(data.frame(Variable = names(bmi_92), Correlation = bmi_92),
+       aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(title = "Spearman Correlation with BMI - 1992",
+       x = "Variable", y = "Correlation Coefficient") +
+  theme_minimal(base_size = 16) +  # 🔹 Increase all text size
+  theme(
+    plot.title = element_text(size = 26, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 18),
+    axis.text = element_text(size = 14),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14)
+  )
+
+```
+
+
+# 1992 FsQCA
+```{r}
+# ---- 11. fsQCA 1992 (same procedure as 2022; thresholds based on the 1992 distributions) ----
+print(fuzzy_AFR_1992)
+#######################
+#Percentiles 10, 50, 90
+quantile(fuzzy_AFR_1992$`Employment in agriculture`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_1992$`female employment`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_1992$`Urban population`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_1992$`Arable land`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_1992$`Food imports`,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+quantile(fuzzy_AFR_1992$BMI,
+         probs = c(.10, .50, .90),
+         na.rm = TRUE)
+
+summary(fuzzy_AFR_1992$BMI)
+#######################
+# Calibration for 1992. Anchors differ from 2022 because the distributions differ
+fuzzy_AFR_1992$BMI_92 <- calibrate(fuzzy_AFR_1992$BMI, type = "fuzzy", thresholds = c(0.96, 2.5, 7.12))
+fuzzy_AFR_1992$GNI1_92 <- calibrate(fuzzy_AFR_1992$GNI, type = "fuzzy", thresholds = c(2695, 5526, 8355))
+
+fuzzy_AFR_1992$SS_92 <- calibrate(fuzzy_AFR_1992$`Sweets and Sugar`, type = "fuzzy", thresholds = c(2.4, 31, 62))
+fuzzy_AFR_1992$Cr_92 <- calibrate(fuzzy_AFR_1992$Cereals, type = "fuzzy", thresholds = c(82.36, 232, 464))
+fuzzy_AFR_1992$FV_92 <- calibrate(fuzzy_AFR_1992$`Fruit and vegetables`, type = "fuzzy", thresholds = c(100, 300, 600))
+fuzzy_AFR_1992$Pl_92 <- calibrate(fuzzy_AFR_1992$Pulses, type = "fuzzy", thresholds = c(0.48, 75, 150))
+fuzzy_AFR_1992$NS_92 <- calibrate(fuzzy_AFR_1992$`Nuts & seeds`, type = "fuzzy", thresholds = c(0.0, 50, 100))
+fuzzy_AFR_1992$An_92 <- calibrate(fuzzy_AFR_1992$`Animal Sources`, type = "fuzzy", thresholds = c(69.05, 157, 334))
+fuzzy_AFR_1992$Rt_92 <- calibrate(fuzzy_AFR_1992$`Starchy Roots`, type = "fuzzy", thresholds = c(25.73, 50, 100))
+
+#Using percentiles
+# Conditions calibrated with 10th / 50th / 90th percentiles.
+fuzzy_AFR_1992$agric90_92 <- calibrate(fuzzy_AFR_1992$`Employment in agriculture`, type = "fuzzy", thresholds = c(32.00, 58.64, 82.80))
+fuzzy_AFR_1992$Urban90_92 <- calibrate(fuzzy_AFR_1992$`Urban population`, type = "fuzzy", thresholds = c(13.97, 31.97, 48.42))
+fuzzy_AFR_1992$female90_92 <- calibrate(fuzzy_AFR_1992$`female employment`, type = "fuzzy", thresholds = c(11.31, 31.28, 50.11))
+fuzzy_AFR_1992$land90_92 <- calibrate(fuzzy_AFR_1992$`Arable land`, type = "fuzzy", thresholds = c(1.35, 10.05, 27.57))
+
+#Using minimum, median, max
+fuzzy_AFR_1992$agric_92 <- calibrate(fuzzy_AFR_1992$`Employment in agriculture`, type = "fuzzy", thresholds = c(14.41, 58.62, 89.63))
+fuzzy_AFR_1992$Urban_92 <- calibrate(fuzzy_AFR_1992$`Urban population`, type = "fuzzy", thresholds = c(6.2, 32.02, 71.75))
+fuzzy_AFR_1992$female_92 <- calibrate(fuzzy_AFR_1992$`female employment`, type = "fuzzy", thresholds = c(6.24, 30.88, 69.65))
+fuzzy_AFR_1992$imports_92 <- calibrate(fuzzy_AFR_1992$`Food imports`, type = "fuzzy", thresholds = c(8.4, 13.47, 17.77))
+#fuzzy_AFR_1992$land_92 <- calibrate(fuzzy_AFR_1992$`Arable land`, type = "fuzzy", thresholds = c(0.41, 11.77, 47.29))
+
+#######################
+#create data frame for conditions and outcome only
+# Conditions + outcome only, as a data.frame.
+qca_data92 <- fuzzy_AFR_1992 %>%
+  dplyr::select(
+    BMI_92,
+    agric90_92,
+    land90_92,
+    Urban90_92,
+    female90_92,
+    GNI1_92,
+    SS_92,
+    Cr_92,
+    FV_92,
+    Pl_92,
+    NS_92,
+    An_92,
+    Rt_92
+  ) %>%
+  as.data.frame()
+#######################
+#Necessity Analysis
+# Necessity analysis (high obesity).
+nec_1992<- pof(data = qca_data92,
+                      outcome = "BMI_92",
+                      conditions = c(
+                        "agric90_92",
+                        "Urban90_92",
+                        "female90_92",
+                        "land90_92",
+                        "GNI1_92",
+                        "SS_92",
+                        "Cr_92",
+                        "FV_92",
+                        "Pl_92",
+                        "NS_92",
+                        "An_92",
+                        "Rt_92"),
+                      relation = "necessity")
+
+print(nec_1992)
+#######################
+# Test necessity for absence of high obesity (outcome = 0)
+qca_data92$low_BMI_92 <- 1 - qca_data92$BMI_92
+
+# Necessity analysis for LOW obesity.
+
+nec92_low <- pofind(
+  data = qca_data92,
+  outcome = "low_BMI_92",
+  conditions = c(
+    "agric90_92",
+    "land90_92",
+    "Urban90_92",
+    "female90_92",
+    "GNI1_92",
+    "SS_92",
+    "Cr_92",
+    "FV_92",
+    "Pl_92",
+    "NS_92",
+    "An_92",
+    "Rt_92"),
+  relation = "necessity"
+)
+
+print(nec92_low)
+#######################
+# Create a truth table
+# Truth table, same cut-offs as for 2022 (incl.cut 0.80, n.cut 2, pri.cut 0.7).
+tt_1992 <- truthTable(
+  qca_data92,
+  outcome = "BMI_92",
+  conditions = c(
+    agric90_92,
+    Urban90_92,
+    female90_92,
+    GNI1_92,
+    SS_92,
+    FV_92,
+    Pl_92,
+    An_92
+  ),
+  incl.cut = 0.80,
+  n.cut = 2,
+  pri.cut = 0.7,
+  show.cases = TRUE,
+  complete =TRUE,
+)
+
+tt_1992
+#######################
+#Complex Solution
+# Complex, parsimonious and intermediate solutions for high obesity in 1992.
+sol_1992 <- minimize(
+  tt_1992,
+  include = "?",
+  details = TRUE,
+)
+sol_1992
+#######################
+# parsimonious solution
+pars_1992 <- minimize(tt_1992,
+                       include = "?",
+                       details = TRUE,
+                       show.cases = TRUE,
+                       dir.exp = NULL,
+                       solution.type = "parsimonious")
+print(pars_1992)
+#######################
+#Intermediate solution
+# Directional expectations (1 = presence expected to contribute to high obesity; "-" = none).
+dir.exph92 <- c(
+  "-",   # agric90_92
+   1,   # Urban90_92
+   1,   # female90_92
+   1,   # GNI1_92
+  1,  # SS_92
+  "-",  # FV_92
+  "-",  # Pl_92
+  "-"   # An_92
+)
+
+intermediate_1992 <- minimize(
+ tt_1992,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = dir.exph92,
+  solution.type = "intermediate"
+)
+
+print(intermediate_1992)
+#######################
+#Check raw values
+# Raw data for countries in the 1992 solution paths
+cases2 <- c(11,19,27,1,3,5,14,24,25,31,33)
+cases21 <-  fuzzy_AFR_1992[cases2, ]
+print(cases21)
+
+#######################
+# Create fuzzy set for low BMI
+# Same analysis for LOW obesity (negated outcome).
+ttlo_1992 <- truthTable(
+  qca_data92,
+  outcome = "low_BMI_92",
+  conditions = c(
+    agric90_92,
+    Urban90_92,
+    female90_92,
+    GNI1_92,
+    SS_92,
+    FV_92,
+    Pl_92,
+    An_92
+  ),
+  incl.cut = 0.8,
+  n.cut = 2,
+  pri.cut = 0.7,
+  show.cases = TRUE,
+  complete =TRUE,
+)
+
+ttlo_1992
+#######################
+#Complex Solution
+sol_lo92 <- minimize(
+  ttlo_1992,
+  include = "?",
+  details = TRUE,
+)
+sol_lo92
+#######################
+# parsimonious solution
+#1
+lparsi_1992 <- minimize(ttlo_1992,
+                        include = "?",
+                        details = TRUE,
+                        show.cases = TRUE,
+                        solution.type = "parsimonious")
+print(lparsi_1992)
+#######################
+#Intermediate solution
+#1
+# Reversed expectations for LOW obesity (absence of the conditions).
+ldir.exp92 <- c(
+  "-",   # agric90_92
+   0,   # Urban90_92
+   0,   # female90_92
+   0,   # GNI1_92
+  0,  # SS_92
+  "-",  # FV_92
+  "-",  # Pl_92
+  "-"   # An_92
+)
+
+linter_1992 <- minimize(
+ ttlo_1992,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = ldir.exp92,
+  solution.type = "intermediate"
+)
+
+print(linter_1992)
+
+
+#############################################################################################################################################################
+#############################################################################################################################################################
+#############################################################################################################################################################
+
+
+
+#sensitivity analysis
+# Sensitivity analysis.
+
+ttS_1992 <- truthTable(
+  qca_data92,
+  outcome = "BMI_92",
+  conditions = c(
+    agric90_92,
+    Urban90_92,
+    female90_92,
+    GNI1_92,
+    SS_92,
+    FV_92,
+    Pl_92,
+    An_92
+  ),
+  incl.cut = 0.85,
+  n.cut = 2,
+  pri.cut = 0.7,
+  show.cases = TRUE,
+  complete =TRUE,
+)
+#######################
+#Intermediate
+Sdir.exp92 <- c(
+  "-",  # agric90_92
+  1,    # Urban90_92
+  1,    # female90_92
+  1,    # GNI1_92
+  1,  # SS_92
+  "-",  # FV_92
+  "-",  # Pl_92
+  "-"   # An_92
+)
+
+
+intermediateS_1992 <- minimize(
+ ttS_1992,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = Sdir.exp92,
+  solution.type = "intermediate"
+)
+
+print(intermediateS_1992)
+
+#######################
+# Raw data 
+casesz <- c(17,7)
+cases2z <-  fuzzy_AFR_1992[casesz, ]
+print(cases2z)
+
+
+
+```
+
+
