@@ -897,9 +897,9 @@ dev.off()
 eat_targets <- tibble::tibble(
   Grouped_Item = c("Sweets and Sugar", "Cereals", "Fruit and vegetables",
                    "Pulses", "Nuts & seeds", "Animal Sources","Starchy Roots"),
-  Lower = c(0, 58, 100, 18.75, 12.5, 14, 12.5),
-  Upper = c(31, 232, 600, 150, 100, 334, 100),
-  Target = c(15, 116, 300, 75, 50, 157, 50)
+  Lower = c(0.07, 122.8, 100, 0.575, 0.302, 82.05, 41.34),
+  Upper = c(62, 464, 600, 150, 100, 334, 100),
+  Target = c(31, 232, 300, 75, 50, 157, 50)
 )
 #######################
 #subset for 1992
@@ -2378,6 +2378,74 @@ interS_2022 <- minimize(
 print(interS_2022)
 
 
+#Sensitivity analysis 2
+#using min, median and max
+qca_data223 <- fuzzy_AFR_2022 %>%
+     dplyr::select(
+         BMI_22,
+         agric_22,
+         land_22,
+         Urban_22,
+         female_22,
+         GNI1_22,
+         SS_22,
+         Cr_22,
+         FV_22,
+         Pl_22,
+         NS_22,
+         An_22,
+         Rt_22
+     ) %>%
+     as.data.frame()
+
+
+ttS_2022_S <- truthTable(
+  qca_data223,
+  outcome = "BMI_22",
+  conditions = c(
+                  "agric_22",
+                       "Urban_22",
+                       "female_22",
+                       "GNI1_22",
+                       "SS_22",
+                       "FV_22",
+                       "Pl_22",
+                       "An_22"),
+  incl.cut = 0.80,
+  n.cut = 2,
+  pri.cut = 0.7,
+  show.cases = TRUE,
+  complete =TRUE, 
+)
+
+
+#Intermediate solution
+#1
+
+
+dir.expS_2 <- c(      #Findings from the correlation analysis were used to apply the direction
+"-",   # agric_22
+ 1,   # Urban_22
+ 1,   # female_22
+ 1,   # GNI1_22
+1,  # SS_22
+"-", # FV_22
+"-",   # Pl_22
+"-"   # An_22
+)
+
+
+
+interS_2022_S <- minimize(
+  ttS_2022_S ,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = dir.expS_2,
+  solution.type = "intermediate"
+)
+
+print(interS_2022_S)
 ```
 
 
@@ -2747,6 +2815,78 @@ print(intermediateS_1992)
 casesz <- c(17,7)
 cases2z <-  fuzzy_AFR_1992[casesz, ]
 print(cases2z)
+
+
+##############################
+#Sensitivity analysis 2
+#min,median, max values
+qca_data923 <- fuzzy_AFR_1992 %>%
+  dplyr::select(
+    BMI_92,
+    agric_92,
+    land_92,
+    Urban_92,
+    female_92,
+    GNI1_92,
+    SS_92,
+    Cr_92,
+    FV_92,
+    Pl_92,
+    NS_92,
+    An_92,
+    Rt_92
+  ) %>%
+  as.data.frame()
+
+
+##############################
+# Create a truth table
+tt_1992_S <- truthTable(
+  qca_data923,
+  outcome = "BMI_92",
+  conditions = c(
+    agric_92,
+    Urban_92,
+    female_92,
+    GNI1_92,
+    SS_92,
+    FV_92,
+    Pl_92,
+    An_92
+  ),
+  incl.cut = 0.80,
+  n.cut = 2,
+  pri.cut = 0.7,
+  show.cases = TRUE,
+  complete =TRUE, 
+)
+
+#tt_1992
+
+#Intermediate solution
+
+dir.exph92_S <- c(
+  "-",   # agric_92
+   1,   # Urban_92
+   1,   # female_92
+   1,   # GNI1_92
+  1,  # SS_92
+  "-",  # FV_92
+  "-",  # Pl_92
+  "-"   # An_92
+)
+
+
+intermediate_1992_S <- minimize(
+ tt_1992_S,
+  include = "?",
+  details = TRUE,
+  show.cases = TRUE,
+  dir.exp = dir.exph92_S,
+  solution.type = "intermediate"
+)
+
+print(intermediate_1992_S)
 
 
 
